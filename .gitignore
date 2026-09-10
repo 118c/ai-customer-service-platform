@@ -5,10 +5,13 @@ __pycache__/
 dist/
 build/
 .venv/
+.venv-win/
 venv/
+.pytest_cache/
 
 # 环境变量（含敏感信息）
 .env
+.env.example.env
 
 # 数据目录
 data/
@@ -34,3 +37,7 @@ build-image*.sh
 *~
 *.bak
 docker-compose(1).yml
+
+# 本地资料区（不进入公开源码）
+wiki/
+面经.md

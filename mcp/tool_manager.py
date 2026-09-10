@@ -17,6 +17,7 @@ import hashlib
 import inspect
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -134,12 +135,14 @@ class MCPToolManager:
       用户查询 → 查询改写（多角度子查询）→ 并行召回 → 结果重排 → 返回 Top-K
     """
 
-    def __init__(self, api_key: str, base_url: Optional[str] = None, model: str = "claude-3-5-sonnet-20241022"):
+    def __init__(self, api_key: str, base_url: Optional[str] = None, model: str = "claude-3-5-sonnet-20241022",
+                 llm_gateway: Optional[Any] = None):
         kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
         self._client = AsyncAnthropic(**kwargs)
         self._model  = model
+        self._llm_gateway = llm_gateway
         self._tools: Dict[str, Tool] = {}
         self._cache: Dict[str, tuple] = {}   # key → (result, expire_at, reranked)
 
@@ -295,12 +298,22 @@ class MCPToolManager:
 原始查询: "{query}"
 返回 JSON 数组，例如: ["子查询1", "子查询2", "子查询3"]"""
         prompt = self._clean_text(prompt)
+        if self._llm_gateway is not None and not self._llm_gateway.remote_available:
+            return [query]
         try:
-            resp = await self._client.messages.create(
-                model=self._model, max_tokens=256, temperature=0.3,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = extract_text_content(resp.content)
+            if self._llm_gateway is not None:
+                raw = await self._llm_gateway.complete(
+                    system="你是企业知识库查询改写器，只返回 JSON 数组。",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=256,
+                    temperature=0.3,
+                )
+            else:
+                resp = await self._client.messages.create(
+                    model=self._model, max_tokens=256, temperature=0.3,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw = extract_text_content(resp.content)
             s, e = raw.find("["), raw.rfind("]") + 1
             queries = json.loads(raw[s:e])
             # 原始查询也保留，去重
@@ -374,12 +387,39 @@ class MCPToolManager:
 只返回 JSON 数组，不要其他文字。"""
         prompt = self._clean_text(prompt)
 
+        if self._llm_gateway is not None and not self._llm_gateway.remote_available:
+            scored = [
+                (self._lexical_relevance(query, item), item)
+                for item in items
+            ]
+            # A single shared bigram (for example “日期”) is too weak to cite.
+            evidenced = [pair for pair in scored if pair[0] >= 2]
+            pool = evidenced or scored
+            return [
+                item for _, item in sorted(
+                    pool,
+                    key=lambda pair: (
+                        pair[0],
+                        float(pair[1].get("score", 0.0)) if isinstance(pair[1], dict) else 0.0,
+                    ),
+                    reverse=True,
+                )[:top_k]
+            ]
+
         try:
-            resp = await self._client.messages.create(
-                model=self._model, max_tokens=256, temperature=0.0,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = extract_text_content(resp.content)
+            if self._llm_gateway is not None:
+                raw = await self._llm_gateway.complete(
+                    system="你是企业知识库重排器，只返回 JSON 数组。",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=256,
+                    temperature=0.0,
+                )
+            else:
+                resp = await self._client.messages.create(
+                    model=self._model, max_tokens=256, temperature=0.0,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw = extract_text_content(resp.content)
             s, e = raw.find("["), raw.rfind("]") + 1
             order: List[int] = json.loads(raw[s:e])
             reranked = [items[i] for i in order if 0 <= i < len(items)]
@@ -387,6 +427,25 @@ class MCPToolManager:
         except Exception as ex:
             logger.warning(f"重排失败，返回原始顺序: {ex}")
             return items[:top_k]
+
+    @staticmethod
+    def _lexical_relevance(query: str, item: Any) -> float:
+        """Cheap local reranking signal for Chinese text and identifiers."""
+        if not isinstance(item, dict):
+            return 0.0
+        query_text = re.sub(r"\s+", "", query.lower())
+        document = re.sub(
+            r"\s+", "", f"{item.get('title', '')}{item.get('content', '')}".lower()
+        )
+        query_bigrams = {
+            query_text[index:index + 2]
+            for index in range(max(0, len(query_text) - 1))
+            if re.search(r"[\w\u4e00-\u9fff]", query_text[index:index + 2])
+        }
+        overlap = sum(1 for token in query_bigrams if token in document)
+        identifiers = set(re.findall(r"[a-z]+-?\d+|[a-z]{2,}|\d+", query_text, re.I))
+        identifier_hits = sum(1 for token in identifiers if token in document)
+        return float(overlap + identifier_hits * 2)
 
     # ── 缓存 ──────────────────────────────────────────────────────────────────
 

@@ -1,7 +1,7 @@
 """
 亮点：多轮对话记忆管理
 
-三级记忆架构，模拟人类记忆机制：
+三级记忆架构，对应不同时间范围的会话信息：
   1. 工作记忆（Redis）—— 当前会话的最近 N 条消息，毫秒级读写
   2. 情景记忆（ChromaDB）—— 跨会话的历史对话，按语义相似度检索
   3. 用户画像（ChromaDB）—— 从对话中提炼的长期偏好和实体
@@ -22,6 +22,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import chromadb
+from core.embedding import HashEmbeddingFunction, local_data_path
 import redis.asyncio as redis
 from anthropic import AsyncAnthropic
 
@@ -93,14 +94,19 @@ class MemoryManager:
         api_key:      str = "",
         base_url:     Optional[str] = None,
         model:        str = "claude-3-5-sonnet-20241022",
+        llm_gateway:  Optional[Any] = None,
     ):
         kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
-        self._client = AsyncAnthropic(**kwargs)
+        self._client = AsyncAnthropic(**kwargs) if llm_gateway is None else None
+        self._llm_gateway = llm_gateway
         self._model  = model
 
         self._redis = redis.from_url(redis_url, decode_responses=True)
+        self._redis_available = True
+        self._local_working: Dict[str, List[str]] = {}
+        self._local_summaries: Dict[str, str] = {}
 
         # ChromaDB：优先连接独立服务（docker compose 模式），连不上则降级为本地嵌入式
         try:
@@ -113,6 +119,7 @@ class MemoryManager:
             chroma.heartbeat()  # 测试连接
             logger.info(f"ChromaDB 已连接: {chroma_host}:{chroma_port}")
         except Exception:
+            chroma_path = local_data_path(chroma_path)
             logger.info(f"ChromaDB 服务不可用，使用本地嵌入式模式: {chroma_path}")
             chroma = chromadb.PersistentClient(
                 path=chroma_path,
@@ -120,9 +127,10 @@ class MemoryManager:
             )
 
         # 情景记忆：存储历史对话片段
-        self._episodic = chroma.get_or_create_collection("episodic")
+        embedding = HashEmbeddingFunction()
+        self._episodic = chroma.get_or_create_collection("episodic", embedding_function=embedding)
         # 用户画像：存储提炼出的偏好和实体
-        self._profile  = chroma.get_or_create_collection("user_profile")
+        self._profile  = chroma.get_or_create_collection("user_profile", embedding_function=embedding)
 
     # ── 写入 ──────────────────────────────────────────────────────────────────
 
@@ -145,22 +153,22 @@ class MemoryManager:
         key = self._wm_key(user_id, conv_id)
 
         # 追加到 Redis 列表（左推，最新在前）
-        await self._redis.lpush(key, json.dumps({
+        raw = json.dumps({
             "role":      msg.role.value,
             "content":   msg.content,
             "ts":        msg.timestamp.isoformat(),
             "metadata":  msg.metadata,
-        }))
-        await self._redis.expire(key, 86400)  # 24h TTL
+        })
+        await self._working_push(key, raw)
 
         # 超过压缩阈值时触发压缩
-        if await self._redis.llen(key) >= self.COMPRESS_AT:
+        if await self._working_len(key) >= self.COMPRESS_AT:
             await self._compress(user_id, conv_id)
 
     async def update_profile(self, user_id: str, conv_id: str) -> None:
         """
         从当前工作记忆中提炼用户偏好，更新用户画像。
-        用 LLM 提炼偏好，然后存入 ChromaDB（ChromaDB 内置 embedding，不依赖外部 API）。
+        用 LLM 提炼偏好，然后通过本地嵌入函数存入 ChromaDB。
         """
         user_id = self._safe_text(user_id)
         conv_id = self._safe_text(conv_id)
@@ -177,11 +185,18 @@ class MemoryManager:
         prompt = self._safe_text(prompt)
 
         try:
-            resp = await self._client.messages.create(
-                model=self._model, max_tokens=512, temperature=0.0,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = extract_text_content(resp.content)
+            if self._llm_gateway is not None:
+                raw = await self._llm_gateway.complete(
+                    system="你是企业员工服务用户画像提炼器，只返回 JSON。",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=512,
+                )
+            else:
+                resp = await self._client.messages.create(
+                    model=self._model, max_tokens=512, temperature=0.0,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw = extract_text_content(resp.content)
             s, e = raw.find("{"), raw.rfind("}") + 1
             profile_data = json.loads(raw[s:e])
 
@@ -193,7 +208,7 @@ class MemoryManager:
             except Exception:
                 pass
 
-            # 直接传 documents，让 ChromaDB 内置模型生成 embedding（不依赖 Voyage API）
+            # 集合已绑定本地嵌入函数，写入过程不依赖外部 Embedding API。
             await asyncio.to_thread(
                 self._profile.add,
                 ids=[doc_id],
@@ -227,7 +242,7 @@ class MemoryManager:
         profile = await self._get_profile(user_id)
 
         # 4. 会话摘要（如果已压缩过）
-        summary = await self._redis.get(self._summary_key(user_id, conv_id)) or ""
+        summary = await self._summary_get(self._summary_key(user_id, conv_id))
 
         return MemoryContext(
             recent_messages=recent,
@@ -257,39 +272,46 @@ class MemoryManager:
         text = self._safe_text("\n".join(f"{m.role.value}: {m.content}" for m in to_compress))
         prompt = self._safe_text(f"用 2-3 句话总结以下对话的关键信息：\n{text}")
         try:
-            resp = await self._client.messages.create(
-                model=self._model, max_tokens=256, temperature=0.0,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            summary = self._safe_text(extract_text_content(resp.content)).strip()
+            if self._llm_gateway is not None:
+                summary = self._safe_text(await self._llm_gateway.complete(
+                    system="你是企业员工服务会话摘要器。",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=256,
+                )).strip()
+            else:
+                resp = await self._client.messages.create(
+                    model=self._model, max_tokens=256, temperature=0.0,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                summary = self._safe_text(extract_text_content(resp.content)).strip()
         except Exception:
             summary = f"对话包含 {len(to_compress)} 条消息（摘要生成失败）"
 
         # 存摘要到 Redis
         skey = self._summary_key(user_id, conv_id)
-        old_summary = await self._redis.get(skey) or ""
+        old_summary = await self._summary_get(skey)
         new_summary = self._safe_text(f"{old_summary}\n{summary}").strip()
-        await self._redis.setex(skey, 86400, new_summary)
+        await self._summary_set(skey, new_summary)
 
         # 旧消息存入情景记忆
         await self._store_episodic(user_id, conv_id, text, summary)
 
         # 重置工作记忆为最近 5 条
         key = self._wm_key(user_id, conv_id)
-        await self._redis.delete(key)
+        raws = []
         for m in reversed(keep):
-            await self._redis.lpush(key, json.dumps({
+            raws.insert(0, json.dumps({
                 "role": m.role.value, "content": m.content,
                 "ts": m.timestamp.isoformat(), "metadata": m.metadata,
             }))
-        await self._redis.expire(key, 86400)
+        await self._working_replace(key, raws)
         logger.info(f"工作记忆压缩完成: {user_id}/{conv_id}，摘要 {len(summary)} 字")
 
     # ── 内部辅助 ──────────────────────────────────────────────────────────────
 
     async def _get_working_memory(self, user_id: str, conv_id: str) -> List[Message]:
         key  = self._wm_key(user_id, conv_id)
-        raws = await self._redis.lrange(key, 0, self.WORKING_MAX - 1)
+        raws = await self._working_raws(key)
         msgs = []
         for raw in reversed(raws):  # Redis lpush 最新在前，reversed 还原时序
             d = json.loads(raw)
@@ -302,12 +324,12 @@ class MemoryManager:
         return msgs
 
     async def _search_episodic(self, user_id: str, query: str) -> List[str]:
-        """语义检索情景记忆。ChromaDB 内置 embedding，不依赖外部 API。"""
+        """使用本地嵌入函数检索情景记忆。"""
         query_text = self._safe_text(query).strip()
         if not query_text:
             return []
         try:
-            # 直接传 query_texts，ChromaDB 内置模型自动生成向量做匹配
+            # 直接传 query_texts，由集合绑定的嵌入函数生成向量。
             results = await asyncio.to_thread(
                 self._episodic.query,
                 query_texts=[query_text],
@@ -321,14 +343,14 @@ class MemoryManager:
             return []
 
     async def _store_episodic(self, user_id: str, conv_id: str, text: str, summary: str) -> None:
-        """将压缩后的对话片段存入情景记忆。ChromaDB 内置 embedding，不依赖外部 API。"""
+        """将压缩后的对话片段存入情景记忆。"""
         try:
             user_id = self._safe_text(user_id)
             conv_id = self._safe_text(conv_id)
             text = self._safe_text(text)
             summary = self._safe_text(summary)
             doc_id = hashlib.md5(f"{user_id}{conv_id}{time.time()}".encode()).hexdigest()
-            # 直接传 documents，ChromaDB 内置模型自动生成 embedding
+            # 由集合绑定的本地嵌入函数生成向量。
             await asyncio.to_thread(
                 self._episodic.add,
                 ids=[doc_id],
@@ -349,9 +371,76 @@ class MemoryManager:
             pass
         return {}
 
+    async def _working_push(self, key: str, raw: str) -> None:
+        if self._redis_available:
+            try:
+                await self._redis.lpush(key, raw)
+                await self._redis.expire(key, 86400)
+                return
+            except Exception as ex:
+                self._disable_redis(ex)
+        values = self._local_working.setdefault(key, [])
+        values.insert(0, raw)
+        del values[self.WORKING_MAX:]
+
+    async def _working_len(self, key: str) -> int:
+        if self._redis_available:
+            try:
+                return int(await self._redis.llen(key))
+            except Exception as ex:
+                self._disable_redis(ex)
+        return len(self._local_working.get(key, []))
+
+    async def _working_raws(self, key: str) -> List[str]:
+        if self._redis_available:
+            try:
+                return await self._redis.lrange(key, 0, self.WORKING_MAX - 1)
+            except Exception as ex:
+                self._disable_redis(ex)
+        return list(self._local_working.get(key, []))
+
+    async def _working_replace(self, key: str, raws: List[str]) -> None:
+        if self._redis_available:
+            try:
+                async with self._redis.pipeline(transaction=True) as pipe:
+                    pipe.delete(key)
+                    if raws:
+                        pipe.rpush(key, *raws)
+                    pipe.expire(key, 86400)
+                    await pipe.execute()
+                return
+            except Exception as ex:
+                self._disable_redis(ex)
+        self._local_working[key] = list(raws)
+
+    async def _summary_get(self, key: str) -> str:
+        if self._redis_available:
+            try:
+                return await self._redis.get(key) or ""
+            except Exception as ex:
+                self._disable_redis(ex)
+        return self._local_summaries.get(key, "")
+
+    async def _summary_set(self, key: str, value: str) -> None:
+        if self._redis_available:
+            try:
+                await self._redis.setex(key, 86400, value)
+                return
+            except Exception as ex:
+                self._disable_redis(ex)
+        self._local_summaries[key] = value
+
+    def _disable_redis(self, error: Exception) -> None:
+        if self._redis_available:
+            logger.warning("Redis 会话存储不可用，切换为进程内会话存储: %s", error)
+        self._redis_available = False
+
     async def close(self) -> None:
         """关闭异步 Redis 连接。"""
-        await self._redis.aclose()
+        try:
+            await self._redis.aclose()
+        except Exception:
+            pass
 
     @staticmethod
     def _wm_key(user_id: str, conv_id: str) -> str:

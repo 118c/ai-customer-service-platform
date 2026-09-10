@@ -7,7 +7,7 @@
   1. 意图识别准确率 —— 预测意图 vs 标注意图，计算 Accuracy / F1
   2. 响应质量评分 —— 用 LLM 作为评判者（LLM-as-Judge），
      从相关性、准确性、完整性、有用性四个维度打分
-  3. 端到端对话评测 —— 模拟完整多轮对话，评估整体体验
+  3. 端到端对话评测 —— 执行完整多轮对话，评估整体体验
   4. 回归测试 —— 与历史基线对比，防止性能退化
 
 LLM-as-Judge 是评测 Agent 质量的关键技术：
@@ -106,9 +106,10 @@ Agent 响应: {response}
 
 只返回 JSON，例如: {{"relevance": 0.9, "accuracy": 0.8, "completeness": 0.7, "helpfulness": 0.85}}"""
 
-    def __init__(self, client: AsyncAnthropic, model: str):
+    def __init__(self, client: AsyncAnthropic, model: str, llm_gateway: Optional[Any] = None):
         self._client = client
         self._model  = model
+        self._llm_gateway = llm_gateway
 
     async def judge(
         self,
@@ -124,11 +125,18 @@ Agent 响应: {response}
         )
         prompt = self._clean_text(prompt)
         try:
-            resp = await self._client.messages.create(
-                model=self._model, max_tokens=256, temperature=0.0,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = extract_text_content(resp.content)
+            if self._llm_gateway is not None:
+                raw = await self._llm_gateway.complete(
+                    system="你是企业员工服务质量评测器，只返回 JSON。",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=256,
+                )
+            else:
+                resp = await self._client.messages.create(
+                    model=self._model, max_tokens=256, temperature=0.0,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw = extract_text_content(resp.content)
             s, e = raw.find("{"), raw.rfind("}") + 1
             data = json.loads(raw[s:e])
             return QualityScores(
@@ -232,6 +240,7 @@ class EndToEndEvaluator:
         base_url: Optional[str] = None,
         model:    str = "claude-3-5-sonnet-20241022",
         baseline_path: Optional[str] = None,
+        llm_gateway: Optional[Any] = None,
     ):
         kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
@@ -239,7 +248,7 @@ class EndToEndEvaluator:
         client = AsyncAnthropic(**kwargs)
 
         self._orchestrator     = orchestrator
-        self._judge            = LLMJudge(client, model)
+        self._judge            = LLMJudge(client, model, llm_gateway)
         self._intent_evaluator = IntentEvaluator(recognizer)
         self._history:         List[EvalReport] = []
         self._baseline_path = pathlib.Path(baseline_path) if baseline_path else None
@@ -479,23 +488,41 @@ class EndToEndEvaluator:
 # ── 内置测试用例（开箱即用）──────────────────────────────────────────────────
 
 DEFAULT_INTENT_CASES: List[IntentTestCase] = [
-    IntentTestCase("我的订单什么时候到？",       "logistics"),
-    IntentTestCase("帮我取消订单",               "request"),
-    IntentTestCase("你们服务太差了！",            "complaint"),
-    IntentTestCase("应用一直报500错误",           "technical_crash"),
-    IntentTestCase("为什么扣了两次款？",          "payment_issue"),
-    IntentTestCase("我要投诉，转人工！",          "human_handoff"),
-    IntentTestCase("你好",                        "greeting"),
-    IntentTestCase("修改我的邮箱地址",            "account"),
-    IntentTestCase("帮我开发票",                  "invoice"),
-    IntentTestCase("退款多久到账？",              "refund"),
-    IntentTestCase("登录一直报401",               "technical_login"),
+    IntentTestCase("焊接工序的温度规范是多少？",   "process_spec"),
+    IntentTestCase("昨晚夜班漏卡怎么补？",          "attendance_query"),
+    IntentTestCase("夜班补贴什么时候发？",          "payroll_query"),
+    IntentTestCase("A3区机台突然停机并报警E104",    "equipment_fault"),
+    IntentTestCase("帮我给设备EQ-A17创建报修单",    "repair_request"),
+    IntentTestCase("申请单WF-202609-001到哪一步了", "workflow_query"),
+    IntentTestCase("帮我提交一份领料申请",          "approval_request"),
+    IntentTestCase("这个问题需要人工协助",          "human_handoff"),
+    IntentTestCase("你们一直没人处理",              "complaint"),
+    IntentTestCase("你好",                          "greeting"),
+    IntentTestCase("请告诉我怎么办",                "request"),
 ]
 
 DEFAULT_DIALOG_CASES: List[Dict[str, Any]] = [
-    {"question": "我的订单 #12345 还没到，已经超时了"},
-    {"question": "应用登录一直报错 401"},
-    {"question": "为什么这个月多扣了 50 块钱？"},
-    {"question": "帮我把收货地址改成北京市朝阳区"},
-    {"turns": ["你好，我想退款", "订单号是 #12345", "退款多久能到账？"]},
+    {"question": "夜班跨天后的考勤日期怎么计算？"},
+    {"question": "设备EQ-A17出现E104报警，现场应该先做什么？"},
+    {"question": "申请单WF-202609-001现在到哪个节点？"},
+    {"question": "帮我发起设备停机审批"},
+    {"turns": ["A3区机台有异响", "设备号是EQ-A17", "帮我创建报修单"]},
 ]
+
+
+async def _run_cli() -> None:
+    """Run the reproducible intent regression suite from the command line."""
+    from core.intent_recognizer import IntentRecognizer
+    from core.llm_gateway import LocalContinuityProvider, ResilientLLMGateway
+
+    dataset = pathlib.Path(__file__).parent / "datasets" / "factory_intents.jsonl"
+    rows = [json.loads(line) for line in dataset.read_text(encoding="utf-8").splitlines()]
+    cases = [IntentTestCase(row["message"], row["expected_intent"]) for row in rows]
+    gateway = ResilientLLMGateway([LocalContinuityProvider()])
+    recognizer = IntentRecognizer(api_key="offline", llm_gateway=gateway)
+    report = await IntentEvaluator(recognizer).evaluate(cases)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    asyncio.run(_run_cli())

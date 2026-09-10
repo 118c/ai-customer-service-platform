@@ -33,17 +33,16 @@ class IntentCategory(Enum):
     GREETING   = "greeting"    # 问候
     ESCALATION = "escalation"  # 要求升级/转人工
     TECHNICAL  = "technical"   # 技术问题
-    BILLING    = "billing"     # 账单/退款
-    ACCOUNT    = "account"     # 账户管理
+    POLICY     = "policy"      # 制度与员工服务
+    WORKFLOW   = "workflow"    # 流程审批
     FEEDBACK   = "feedback"    # 正面反馈
-    ORDER_STATUS = "order_status"        # 订单状态
-    LOGISTICS = "logistics"              # 物流配送
-    REFUND = "refund"                    # 退款/退货
-    INVOICE = "invoice"                  # 发票
-    PAYMENT_ISSUE = "payment_issue"      # 支付/扣款异常
-    ACCOUNT_SECURITY = "account_security" # 账户安全
-    TECHNICAL_LOGIN = "technical_login"  # 登录认证故障
-    TECHNICAL_CRASH = "technical_crash"  # 崩溃/错误码
+    PROCESS_SPEC = "process_spec"        # 工艺规范
+    ATTENDANCE_QUERY = "attendance_query" # 考勤/班次制度
+    PAYROLL_QUERY = "payroll_query"      # 薪资与补贴
+    EQUIPMENT_FAULT = "equipment_fault"  # 设备故障诊断
+    REPAIR_REQUEST = "repair_request"    # 创建/查询报修
+    WORKFLOW_QUERY = "workflow_query"    # 流程状态查询
+    APPROVAL_REQUEST = "approval_request" # 审批申请
     HUMAN_HANDOFF = "human_handoff"      # 转人工
     OTHER      = "other"
 
@@ -69,55 +68,52 @@ class IntentResult:
 
 # ── Few-shot 模板（同时用于 LLM 示例和 Embedding 匹配）────────────────────────
 _TEMPLATES: Dict[IntentCategory, List[str]] = {
-    IntentCategory.QUERY:      ["我的订单状态是什么？", "如何重置密码？", "快递什么时候到？"],
+    IntentCategory.QUERY:      ["制度在哪里查看？", "今天谁值班？", "这个流程怎么走？"],
     IntentCategory.COMPLAINT:  ["等了好几个小时！", "服务太差了！", "一直没人处理！"],
-    IntentCategory.REQUEST:    ["帮我取消订单", "我需要修改地址", "请协助退款"],
+    IntentCategory.REQUEST:    ["帮我发起申请", "我要提交报修", "请协助处理"],
     IntentCategory.GREETING:   ["你好", "嗨，有人吗", "早上好"],
     IntentCategory.ESCALATION: ["我要投诉！", "转人工客服", "找你们经理"],
-    IntentCategory.TECHNICAL:  ["应用一直崩溃", "无法登录", "出现500错误"],
-    IntentCategory.BILLING:    ["为什么扣了两次款？", "申请退款", "发票问题"],
-    IntentCategory.ACCOUNT:    ["修改邮箱", "注销账户", "更新个人信息"],
+    IntentCategory.TECHNICAL:  ["设备一直报警", "产线终端无法登录", "控制台出现E104错误"],
+    IntentCategory.POLICY:     ["夜班考勤怎么算？", "请假制度是什么？", "高温补贴怎么发？"],
+    IntentCategory.WORKFLOW:   ["审批到哪一步了？", "怎么提交领料申请？", "变更流程谁审批？"],
     IntentCategory.FEEDBACK:   ["服务很棒！", "非常满意", "给个好评"],
-    IntentCategory.ORDER_STATUS: ["我的订单现在是什么状态？", "订单有没有发货？", "订单处理到哪一步了？"],
-    IntentCategory.LOGISTICS: ["快递什么时候到？", "物流一直不更新", "配送要多久？"],
-    IntentCategory.REFUND: ["我要申请退款", "退货退款怎么处理？", "退款多久到账？"],
-    IntentCategory.INVOICE: ["帮我开发票", "发票抬头怎么改？", "电子发票在哪里？"],
-    IntentCategory.PAYMENT_ISSUE: ["为什么重复扣款？", "支付失败怎么办？", "这个月多扣了钱"],
-    IntentCategory.ACCOUNT_SECURITY: ["账户被盗了", "发现异常登录", "我要重置密码"],
-    IntentCategory.TECHNICAL_LOGIN: ["登录一直报401", "验证码收不到", "无法登录账号"],
-    IntentCategory.TECHNICAL_CRASH: ["应用一直崩溃", "页面报500错误", "系统闪退"],
+    IntentCategory.PROCESS_SPEC: ["焊接温度规范是多少？", "这道工序的检验标准？", "SOP在哪里？"],
+    IntentCategory.ATTENDANCE_QUERY: ["夜班怎么打卡？", "漏卡怎么补？", "请假需要提前多久？"],
+    IntentCategory.PAYROLL_QUERY: ["夜班补贴什么时候发？", "加班费怎么算？", "工资明细在哪里？"],
+    IntentCategory.EQUIPMENT_FAULT: ["设备报警E104", "机台异响", "产线停机了"],
+    IntentCategory.REPAIR_REQUEST: ["帮我创建报修单", "查询维修进度", "设备需要检修"],
+    IntentCategory.WORKFLOW_QUERY: ["申请单到哪一步了？", "审批人是谁？", "查询流程状态"],
+    IntentCategory.APPROVAL_REQUEST: ["提交请假申请", "发起领料审批", "帮我提交变更单"],
     IntentCategory.HUMAN_HANDOFF: ["转人工客服", "我要找人工", "请升级处理"],
 }
 
 _SPECIFIC_INTENTS = {
-    IntentCategory.ORDER_STATUS,
-    IntentCategory.LOGISTICS,
-    IntentCategory.REFUND,
-    IntentCategory.INVOICE,
-    IntentCategory.PAYMENT_ISSUE,
-    IntentCategory.ACCOUNT_SECURITY,
-    IntentCategory.TECHNICAL_LOGIN,
-    IntentCategory.TECHNICAL_CRASH,
+    IntentCategory.PROCESS_SPEC,
+    IntentCategory.ATTENDANCE_QUERY,
+    IntentCategory.PAYROLL_QUERY,
+    IntentCategory.EQUIPMENT_FAULT,
+    IntentCategory.REPAIR_REQUEST,
+    IntentCategory.WORKFLOW_QUERY,
+    IntentCategory.APPROVAL_REQUEST,
     IntentCategory.HUMAN_HANDOFF,
 }
 
 _GENERIC_INTENTS = {
     IntentCategory.QUERY,
-    IntentCategory.BILLING,
+    IntentCategory.POLICY,
     IntentCategory.TECHNICAL,
-    IntentCategory.ACCOUNT,
+    IntentCategory.WORKFLOW,
     IntentCategory.ESCALATION,
 }
 
 _INTENT_GROUPS: Dict[IntentCategory, IntentCategory] = {
-    IntentCategory.ORDER_STATUS: IntentCategory.QUERY,
-    IntentCategory.LOGISTICS: IntentCategory.QUERY,
-    IntentCategory.REFUND: IntentCategory.BILLING,
-    IntentCategory.INVOICE: IntentCategory.BILLING,
-    IntentCategory.PAYMENT_ISSUE: IntentCategory.BILLING,
-    IntentCategory.ACCOUNT_SECURITY: IntentCategory.ACCOUNT,
-    IntentCategory.TECHNICAL_LOGIN: IntentCategory.TECHNICAL,
-    IntentCategory.TECHNICAL_CRASH: IntentCategory.TECHNICAL,
+    IntentCategory.PROCESS_SPEC: IntentCategory.QUERY,
+    IntentCategory.ATTENDANCE_QUERY: IntentCategory.POLICY,
+    IntentCategory.PAYROLL_QUERY: IntentCategory.POLICY,
+    IntentCategory.EQUIPMENT_FAULT: IntentCategory.TECHNICAL,
+    IntentCategory.REPAIR_REQUEST: IntentCategory.TECHNICAL,
+    IntentCategory.WORKFLOW_QUERY: IntentCategory.WORKFLOW,
+    IntentCategory.APPROVAL_REQUEST: IntentCategory.WORKFLOW,
     IntentCategory.HUMAN_HANDOFF: IntentCategory.ESCALATION,
 }
 
@@ -151,11 +147,13 @@ class IntentRecognizer:
         base_url: Optional[str] = None,
         model: str = "claude-3-5-sonnet-20241022",
         confidence_threshold: float = 0.5,
+        llm_gateway: Optional[Any] = None,
     ):
         kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
-        self.client    = AsyncAnthropic(**kwargs)
+        self.client = AsyncAnthropic(**kwargs) if llm_gateway is None else None
+        self._llm_gateway = llm_gateway
         self.model     = model
         self.threshold = confidence_threshold
         # 第三方兼容 API（如 DeepSeek）通常不支持 Embedding，禁用该策略。
@@ -200,6 +198,13 @@ class IntentRecognizer:
             emb = {"intent": IntentCategory.OTHER, "confidence": 0.0}
 
         intent, confidence, source_scores = self._vote(llm, emb, pat)
+        explicit_action = self._explicit_action_intent(message)
+        if explicit_action is not None:
+            # 明确的“提交/创建”表达代表业务写入，不能被历史上下文误判为查询。
+            # 这层确定性护栏同时保证后续工作流必定进入确认节点。
+            intent = explicit_action
+            confidence = max(confidence, 0.95)
+            source_scores["explicit_action"] = 1.0
         entities = self._extract_entities(message)
         urgency  = self._urgency(message, intent)
 
@@ -254,7 +259,7 @@ class IntentRecognizer:
 
         prompt = f"""你是客服意图分析专家。根据示例判断用户意图，返回 JSON。
 如果用户问题能匹配细粒度业务意图，请优先返回细粒度意图，而不是宽泛大类。
-例如退款优先返回 refund，发票优先返回 invoice，登录故障优先返回 technical_login。
+        例如设备报警优先返回 equipment_fault，补卡优先返回 attendance_query，提交审批优先返回 approval_request。
 
 示例:
 {examples}
@@ -269,13 +274,21 @@ class IntentRecognizer:
         prompt = self._clean_text(prompt)
 
         try:
-            resp = await self.client.messages.create(
-                model=self.model,
-                max_tokens=256,
-                temperature=0.1,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = extract_text_content(resp.content)
+            if self._llm_gateway is not None:
+                raw = await self._llm_gateway.complete(
+                    system="你是企业员工服务意图分析器，只返回 JSON。",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=256,
+                    temperature=0.1,
+                )
+            else:
+                resp = await self.client.messages.create(
+                    model=self.model,
+                    max_tokens=256,
+                    temperature=0.1,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw = extract_text_content(resp.content)
             s, e = raw.find("{"), raw.rfind("}") + 1
             data = json.loads(raw[s:e])
             try:
@@ -309,14 +322,13 @@ class IntentRecognizer:
         msg = message.lower()
         specific_patterns = {
             IntentCategory.HUMAN_HANDOFF: ["转人工", "人工客服", "找人工"],
-            IntentCategory.ORDER_STATUS: ["订单状态", "发货了吗", "处理到哪", "order status"],
-            IntentCategory.LOGISTICS: ["物流", "快递", "配送", "运单", "delivery", "shipping"],
-            IntentCategory.REFUND: ["退款", "退货", "refund", "return"],
-            IntentCategory.INVOICE: ["发票", "抬头", "税号", "invoice"],
-            IntentCategory.PAYMENT_ISSUE: ["重复扣款", "多扣", "支付失败", "扣费", "payment failed"],
-            IntentCategory.ACCOUNT_SECURITY: ["被盗", "异常登录", "重置密码", "两步验证", "安全"],
-            IntentCategory.TECHNICAL_LOGIN: ["无法登录", "登录失败", "401", "验证码"],
-            IntentCategory.TECHNICAL_CRASH: ["崩溃", "闪退", "500", "报错", "crash"],
+            IntentCategory.PROCESS_SPEC: ["工艺规范", "检验标准", "作业指导", "sop", "工序参数"],
+            IntentCategory.ATTENDANCE_QUERY: ["考勤", "打卡", "漏卡", "补卡", "请假", "班次"],
+            IntentCategory.PAYROLL_QUERY: ["工资", "薪资", "加班费", "夜班补贴", "津贴"],
+            IntentCategory.EQUIPMENT_FAULT: ["设备故障", "机台异常", "停机", "异响", "报警码"],
+            IntentCategory.REPAIR_REQUEST: ["报修", "维修单", "检修", "维修进度"],
+            IntentCategory.WORKFLOW_QUERY: ["审批进度", "流程状态", "申请单", "审批人"],
+            IntentCategory.APPROVAL_REQUEST: ["提交审批", "发起申请", "提交请假", "领料申请", "变更单"],
         }
         generic_patterns = {
             IntentCategory.ESCALATION: ["投诉", "经理", "supervisor"],
@@ -324,9 +336,9 @@ class IntentRecognizer:
             IntentCategory.QUERY:      ["?", "？", "怎么", "什么", "status"],
             IntentCategory.REQUEST:    ["帮我", "需要", "please", "help"],
             IntentCategory.GREETING:   ["你好", "嗨", "hello", "hi"],
-            IntentCategory.BILLING:    ["退款", "扣款", "发票", "refund"],
-            IntentCategory.TECHNICAL:  ["崩溃", "报错", "error", "crash"],
-            IntentCategory.ACCOUNT:    ["密码", "邮箱", "账户", "password"],
+            IntentCategory.POLICY:     ["制度", "考勤", "薪资", "补贴"],
+            IntentCategory.TECHNICAL:  ["故障", "报错", "error", "停机"],
+            IntentCategory.WORKFLOW:   ["流程", "审批", "申请"],
         }
 
         best_cat, best_score = self._best_pattern_match(msg, specific_patterns)
@@ -379,8 +391,9 @@ class IntentRecognizer:
         """用规则提取高价值实体，避免每次识别都额外调用 LLM。"""
         message = self._clean_text(message)
         return {
-            "order_id": self._unique(re.findall(r"(?:订单号?|order(?:_id)?|#)\s*[:：#]?\s*([A-Za-z0-9_-]{4,32})", message, re.I)),
-            "product": [],
+            "employee_id": self._unique(re.findall(r"(?:工号|employee(?:_id)?)\s*[:：#]?\s*([A-Za-z0-9_-]{4,32})", message, re.I)),
+            "equipment_id": self._unique(re.findall(r"(?:设备号?|机台号?|equipment(?:_id)?)\s*[:：#]?\s*([A-Za-z0-9_-]{3,32})", message, re.I)),
+            "workflow_id": self._unique(re.findall(r"(?:申请单|流程号|审批单|workflow(?:_id)?)\s*[:：#]?\s*([A-Za-z0-9_-]{4,32})", message, re.I)),
             "date": self._unique(re.findall(r"(今天|明天|昨天|本周|这周|下周|\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?)", message)),
             "amount": self._unique(re.findall(r"((?:¥|￥)\s*\d+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?\s*(?:元|块|rmb|cny|usd|美元))", message, re.I)),
             "error_code": self._unique(re.findall(r"\b([45]\d{2}|[A-Z][A-Z0-9_-]{2,16})\b", message)),
@@ -462,6 +475,18 @@ class IntentRecognizer:
             ]
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _explicit_action_intent(message: str) -> Optional[IntentCategory]:
+        normalized = message.lower().strip()
+        action_verbs = ("提交", "发起", "创建", "新建", "办理", "帮我")
+        if not any(verb in normalized for verb in action_verbs):
+            return None
+        if any(term in normalized for term in ("报修", "维修单", "检修单")):
+            return IntentCategory.REPAIR_REQUEST
+        if any(term in normalized for term in ("申请", "审批", "领料", "请假", "变更单")):
+            return IntentCategory.APPROVAL_REQUEST
+        return None
 
     @staticmethod
     def _unique(values: List[str]) -> List[str]:

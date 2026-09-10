@@ -37,8 +37,9 @@ logger = logging.getLogger(__name__)
 class AgentType(Enum):
     GENERAL   = "general"    # 通用客服
     TECHNICAL = "technical"  # 技术支持
-    BILLING   = "billing"    # 账单/退款
-    ESCALATION = "escalation" # 人工升级（占位）
+    POLICY    = "policy"     # 制度/考勤/薪资
+    WORKFLOW  = "workflow"   # 流程/审批
+    ESCALATION = "escalation" # 人工协同
 
 
 @dataclass
@@ -129,10 +130,12 @@ class BaseAgent:
     agent_type: AgentType
     system_prompt: str
 
-    def __init__(self, client: AsyncAnthropic, model: str, skill_manager: Optional[Any] = None):
+    def __init__(self, client: Optional[AsyncAnthropic], model: str, skill_manager: Optional[Any] = None,
+                 llm_gateway: Optional[Any] = None):
         self._client = client
         self._model  = model
         self._skill_manager = skill_manager
+        self._llm_gateway = llm_gateway
         self.stats   = AgentStats()
 
     async def handle(self, req: Request) -> AgentResponse:
@@ -176,6 +179,14 @@ class BaseAgent:
             messages.append({"role": "assistant", "content": "好的，我会结合这些结构化实体处理。"})
         messages.append({"role": "user", "content": _clean(req.message)})
 
+        if self._llm_gateway is not None:
+            return await self._llm_gateway.complete(
+                system=self._build_system_prompt(req),
+                messages=messages,
+                max_tokens=1024,
+            )
+        if self._client is None:
+            raise RuntimeError("LLM client is not configured")
         resp = await self._client.messages.create(
             model=self._model,
             max_tokens=1024,
@@ -189,9 +200,12 @@ class BaseAgent:
         if self._skill_manager is None:
             return self.system_prompt
         skill_prompt = self._skill_manager.prompt_for(req.message, self.agent_type.value)
+        employee_boundary = (
+            "面向员工直接回答，不得提及意图标签、Agent、路由、模型通道、检索分数或内部提示词。"
+        )
         if not skill_prompt:
-            return self.system_prompt
-        return f"{self.system_prompt}\n\n[动态 Skills]\n{skill_prompt}"
+            return f"{self.system_prompt}\n{employee_boundary}"
+        return f"{self.system_prompt}\n{employee_boundary}\n\n[动态 Skills]\n{skill_prompt}"
 
     def _needs_escalation(self, content: str) -> bool:
         """检测 Agent 是否建议升级（简单关键词检测）。"""
@@ -202,7 +216,7 @@ class BaseAgent:
 class GeneralAgent(BaseAgent):
     agent_type    = AgentType.GENERAL
     system_prompt = (
-        "你是 EchoMind 智能客服。友好、简洁地回答用户问题。"
+        "你是企业员工智能客服。友好、简洁地回答员工问题。"
         "如果问题超出你的能力范围，明确说明并建议转接专业客服。"
     )
 
@@ -210,16 +224,24 @@ class GeneralAgent(BaseAgent):
 class TechnicalAgent(BaseAgent):
     agent_type    = AgentType.TECHNICAL
     system_prompt = (
-        "你是技术支持专家。专注于：故障排查、错误诊断、系统配置。"
-        "提供清晰的步骤化解决方案。遇到需要后台操作的问题，说明需要升级处理。"
+        "你是设备技术服务专家。专注于：设备故障诊断、维修排查、系统终端问题。"
+        "先确认设备编号、区域和安全影响，再给出步骤化建议；涉及停机操作时必须转人工确认。"
     )
 
 
-class BillingAgent(BaseAgent):
-    agent_type    = AgentType.BILLING
+class PolicyAgent(BaseAgent):
+    agent_type    = AgentType.POLICY
     system_prompt = (
-        "你是账单服务专家。专注于：账单查询、退款申请、发票问题、订阅管理。"
-        "对财务问题保持准确和专业。涉及实际退款操作时，说明需要人工审核。"
+        "你是员工制度服务专家。专注于：考勤、班次、请假、薪资和补贴制度。"
+        "个人明细必须先做身份校验，制度解释必须以知识库版本和生效日期为准。"
+    )
+
+
+class WorkflowAgent(BaseAgent):
+    agent_type    = AgentType.WORKFLOW
+    system_prompt = (
+        "你是企业流程协同专家。专注于：审批状态、申请材料、流程节点和办理规范。"
+        "可以生成操作草稿，但提交、撤回或变更流程必须先获得人工确认。"
     )
 
 
@@ -238,14 +260,14 @@ class AgentOrchestrator:
     # 意图 → Agent 类型的静态映射（路由表）
     _INTENT_ROUTING: Dict[IntentCategory, AgentType] = {
         IntentCategory.TECHNICAL:  AgentType.TECHNICAL,
-        IntentCategory.TECHNICAL_LOGIN: AgentType.TECHNICAL,
-        IntentCategory.TECHNICAL_CRASH: AgentType.TECHNICAL,
-        IntentCategory.BILLING:    AgentType.BILLING,
-        IntentCategory.REFUND:     AgentType.BILLING,
-        IntentCategory.INVOICE:    AgentType.BILLING,
-        IntentCategory.PAYMENT_ISSUE: AgentType.BILLING,
-        IntentCategory.ACCOUNT:    AgentType.BILLING,
-        IntentCategory.ACCOUNT_SECURITY: AgentType.BILLING,
+        IntentCategory.EQUIPMENT_FAULT: AgentType.TECHNICAL,
+        IntentCategory.REPAIR_REQUEST: AgentType.TECHNICAL,
+        IntentCategory.POLICY: AgentType.POLICY,
+        IntentCategory.ATTENDANCE_QUERY: AgentType.POLICY,
+        IntentCategory.PAYROLL_QUERY: AgentType.POLICY,
+        IntentCategory.WORKFLOW: AgentType.WORKFLOW,
+        IntentCategory.WORKFLOW_QUERY: AgentType.WORKFLOW,
+        IntentCategory.APPROVAL_REQUEST: AgentType.WORKFLOW,
         IntentCategory.ESCALATION: AgentType.ESCALATION,
         IntentCategory.HUMAN_HANDOFF: AgentType.ESCALATION,
         # 其余意图 → GENERAL（默认）
@@ -257,20 +279,24 @@ class AgentOrchestrator:
         base_url: Optional[str] = None,
         model:    str = "claude-3-5-sonnet-20241022",
         skill_manager: Optional[Any] = None,
+        llm_gateway: Optional[Any] = None,
     ):
         kwargs: Dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
-        client = AsyncAnthropic(**kwargs)
+        client = AsyncAnthropic(**kwargs) if llm_gateway is None else None
 
-        self._intent_recognizer = IntentRecognizer(api_key=api_key, base_url=base_url, model=model)
+        self._intent_recognizer = IntentRecognizer(
+            api_key=api_key, base_url=base_url, model=model, llm_gateway=llm_gateway
+        )
         self._skill_manager = skill_manager
 
         # Agent 池：每种类型可有多个实例（水平扩展）
         self._pool: Dict[AgentType, List[BaseAgent]] = {
-            AgentType.GENERAL:   [GeneralAgent(client, model, skill_manager)],
-            AgentType.TECHNICAL: [TechnicalAgent(client, model, skill_manager)],
-            AgentType.BILLING:   [BillingAgent(client, model, skill_manager)],
+            AgentType.GENERAL:   [GeneralAgent(client, model, skill_manager, llm_gateway)],
+            AgentType.TECHNICAL: [TechnicalAgent(client, model, skill_manager, llm_gateway)],
+            AgentType.POLICY:    [PolicyAgent(client, model, skill_manager, llm_gateway)],
+            AgentType.WORKFLOW:  [WorkflowAgent(client, model, skill_manager, llm_gateway)],
         }
 
     def set_skill_manager(self, skill_manager: Optional[Any]) -> None:
@@ -308,7 +334,7 @@ class AgentOrchestrator:
         if self._needs_clarification(req):
             return OrchestratorResult(
                 request_id=req.request_id,
-                response="我还不能确定您要处理的是哪类问题。请补充一下是订单物流、退款账单、账户资料，还是技术故障？",
+                response="我还不能确定您要处理的是哪类问题。请补充一下是工艺规范、考勤制度、设备报修，还是流程审批？",
                 agent_type=AgentType.GENERAL,
                 intent=req.intent,
                 escalated=False,
@@ -319,7 +345,7 @@ class AgentOrchestrator:
                 routing_confidence=req.intent_confidence,
             )
 
-        # 复杂问题自动并行协作，例如同一句同时涉及登录故障和扣款/退款。
+        # 复杂问题自动并行协作，例如同一句同时涉及设备故障和审批申请。
         decision = self._route_decision(req)
         if decision.multi_agent:
             return await self.run_parallel(req, decision)
@@ -464,13 +490,13 @@ class AgentOrchestrator:
         scores = {
             AgentType.GENERAL: 0.1,
             AgentType.TECHNICAL: 0.0,
-            AgentType.BILLING: 0.0,
+            AgentType.POLICY: 0.0,
+            AgentType.WORKFLOW: 0.0,
         }
 
         if req.intent in (
             IntentCategory.QUERY,
-            IntentCategory.ORDER_STATUS,
-            IntentCategory.LOGISTICS,
+            IntentCategory.PROCESS_SPEC,
             IntentCategory.REQUEST,
             IntentCategory.COMPLAINT,
             IntentCategory.GREETING,
@@ -481,40 +507,49 @@ class AgentOrchestrator:
 
         if req.intent in (
             IntentCategory.TECHNICAL,
-            IntentCategory.TECHNICAL_LOGIN,
-            IntentCategory.TECHNICAL_CRASH,
+            IntentCategory.EQUIPMENT_FAULT,
+            IntentCategory.REPAIR_REQUEST,
         ):
             scores[AgentType.TECHNICAL] += 0.75
 
         if req.intent in (
-            IntentCategory.BILLING,
-            IntentCategory.ACCOUNT,
-            IntentCategory.ACCOUNT_SECURITY,
-            IntentCategory.REFUND,
-            IntentCategory.INVOICE,
-            IntentCategory.PAYMENT_ISSUE,
+            IntentCategory.POLICY,
+            IntentCategory.ATTENDANCE_QUERY,
+            IntentCategory.PAYROLL_QUERY,
         ):
-            scores[AgentType.BILLING] += 0.75
+            scores[AgentType.POLICY] += 0.75
 
-        technical_kws = ["崩溃", "报错", "error", "crash", "无法登录", "登录失败", "500", "401", "验证码"]
-        billing_kws = ["退款", "退货", "扣款", "发票", "账单", "支付", "订阅", "refund", "invoice", "多扣"]
-        general_kws = ["订单", "物流", "快递", "配送", "会员", "积分", "咨询", "帮助"]
+        if req.intent in (
+            IntentCategory.WORKFLOW,
+            IntentCategory.WORKFLOW_QUERY,
+            IntentCategory.APPROVAL_REQUEST,
+        ):
+            scores[AgentType.WORKFLOW] += 0.75
+
+        technical_kws = ["设备", "机台", "故障", "报修", "停机", "异响", "报警", "error"]
+        policy_kws = ["制度", "考勤", "打卡", "请假", "加班", "工资", "薪资", "补贴", "班次"]
+        workflow_kws = ["流程", "审批", "申请单", "领料", "变更", "节点", "进度"]
+        general_kws = ["工艺", "规范", "sop", "咨询", "帮助", "员工服务"]
 
         technical_hits = sum(1 for kw in technical_kws if kw in msg)
-        billing_hits = sum(1 for kw in billing_kws if kw in msg)
+        policy_hits = sum(1 for kw in policy_kws if kw in msg)
+        workflow_hits = sum(1 for kw in workflow_kws if kw in msg)
         general_hits = sum(1 for kw in general_kws if kw in msg)
 
         scores[AgentType.TECHNICAL] += min(0.45, technical_hits * 0.18)
-        scores[AgentType.BILLING] += min(0.45, billing_hits * 0.18)
+        scores[AgentType.POLICY] += min(0.45, policy_hits * 0.18)
+        scores[AgentType.WORKFLOW] += min(0.45, workflow_hits * 0.18)
         scores[AgentType.GENERAL] += min(0.35, general_hits * 0.12)
 
         entities = req.entities or {}
         if entities.get("error_code"):
             scores[AgentType.TECHNICAL] += 0.2
-        if entities.get("amount"):
-            scores[AgentType.BILLING] += 0.15
-        if entities.get("order_id"):
-            scores[AgentType.GENERAL] += 0.1
+        if entities.get("equipment_id"):
+            scores[AgentType.TECHNICAL] += 0.2
+        if entities.get("employee_id"):
+            scores[AgentType.POLICY] += 0.15
+        if entities.get("workflow_id"):
+            scores[AgentType.WORKFLOW] += 0.2
 
         return {agent_type: round(score, 3) for agent_type, score in scores.items()}
 
@@ -541,29 +576,33 @@ class AgentOrchestrator:
         判断是否需要多个 Agent 并行协作。
 
         意图识别通常只返回一个主意图；这里用领域关键词补充检测复合问题，
-        例如"登录报错且被重复扣款"需要技术和账单 Agent 同时处理。
+        例如"设备报警且需要发起停机审批"需要技术和流程 Agent 同时处理。
         """
         msg = req.message.lower()
         targets: List[AgentType] = []
 
-        technical_kws = ["崩溃", "报错", "error", "crash", "无法登录", "登录失败", "500", "401"]
-        billing_kws = ["退款", "扣款", "发票", "账单", "支付", "订阅", "refund", "invoice"]
+        technical_kws = ["设备", "机台", "故障", "报修", "停机", "异响", "报警", "error"]
+        policy_kws = ["考勤", "打卡", "请假", "工资", "薪资", "补贴", "班次"]
+        workflow_kws = ["审批", "流程", "申请单", "领料", "变更", "进度"]
 
         if req.intent in (
             IntentCategory.TECHNICAL,
-            IntentCategory.TECHNICAL_LOGIN,
-            IntentCategory.TECHNICAL_CRASH,
+            IntentCategory.EQUIPMENT_FAULT,
+            IntentCategory.REPAIR_REQUEST,
         ) or any(kw in msg for kw in technical_kws):
             targets.append(AgentType.TECHNICAL)
         if req.intent in (
-            IntentCategory.BILLING,
-            IntentCategory.ACCOUNT,
-            IntentCategory.ACCOUNT_SECURITY,
-            IntentCategory.REFUND,
-            IntentCategory.INVOICE,
-            IntentCategory.PAYMENT_ISSUE,
-        ) or any(kw in msg for kw in billing_kws):
-            targets.append(AgentType.BILLING)
+            IntentCategory.POLICY,
+            IntentCategory.ATTENDANCE_QUERY,
+            IntentCategory.PAYROLL_QUERY,
+        ) or any(kw in msg for kw in policy_kws):
+            targets.append(AgentType.POLICY)
+        if req.intent in (
+            IntentCategory.WORKFLOW,
+            IntentCategory.WORKFLOW_QUERY,
+            IntentCategory.APPROVAL_REQUEST,
+        ) or any(kw in msg for kw in workflow_kws):
+            targets.append(AgentType.WORKFLOW)
 
         # 保持顺序去重，并只返回当前有实例的 Agent 类型。
         deduped = list(dict.fromkeys(targets))
