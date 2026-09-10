@@ -106,15 +106,14 @@ services:
       retries: 3
       start_period: 90s
 
-  # ── Nginx 反向代理 ──────────────────────────────────────────────────────────
-  nginx:
-    image: nginx:alpine
-    container_name: employee-service-nginx
+  # ── 员工端 Web 与 API 反向代理 ──────────────────────────────────────────────
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: employee-service-web
     ports:
       - "80:80"
-    volumes:
-      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - nginx-logs:/var/log/nginx
     depends_on:
       app:
         condition: service_healthy
@@ -141,4 +140,3 @@ volumes:
   redis-data:
   chromadb-data:
   prometheus-data:
-  nginx-logs:

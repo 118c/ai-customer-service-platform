@@ -13,8 +13,9 @@ npm run dev
 
 ## 生产构建
 
+在项目根目录执行：
+
 ```bash
-npm run build
 docker compose up -d --build
 ```
 

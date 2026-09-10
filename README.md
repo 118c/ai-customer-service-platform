@@ -44,6 +44,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
+- Web：`http://localhost`
 - API：`http://localhost:8000`
 - OpenAPI：`http://localhost:8000/docs`
 - ChromaDB：`http://localhost:8001`
@@ -60,6 +61,14 @@ uvicorn api.main:app --reload --port 8000
 ```
 
 Windows PowerShell 使用 `.\.venv\Scripts\Activate.ps1` 激活环境。未配置外部模型或企业系统地址时，服务使用本地连续性模型和参考业务实现；它们遵循与生产连接器相同的接口契约，便于离线开发和集成验证。
+
+在另一个终端启动员工端：
+
+```bash
+cd web
+npm install
+npm run dev
+```
 
 ## API 分层
 

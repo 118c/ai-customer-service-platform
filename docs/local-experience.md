@@ -16,7 +16,7 @@ uvicorn api.main:app --host 127.0.0.1 --port 8000
 
 前端：
 
-在前端工程目录执行：
+在项目的 `web` 目录执行：
 
 ```bash
 npm install
