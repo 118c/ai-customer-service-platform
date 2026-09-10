@@ -1,9 +1,9 @@
 services:
-  echomind-frontend:
+  employee-service-web:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: echomind-frontend
+    container_name: employee-service-web
     ports:
       - "5174:80"
     extra_hosts:

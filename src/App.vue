@@ -1,322 +1,280 @@
 <template>
-  <main class="app-shell">
-    <aside class="sidebar">
-      <section class="brand">
-        <div class="brand-mark">EM</div>
+  <main class="app-shell" :class="{ 'with-references': referencesOpen }">
+    <aside class="history-panel">
+      <div class="product">
+        <div class="product-mark" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
         <div>
-          <h1>EchoMind Console</h1>
-          <p>统一调试 Python 与 Java 版本</p>
+          <strong>员工智能客服</strong>
+          <small>企业内部服务</small>
         </div>
+      </div>
+
+      <button class="new-conversation" @click="newConversation">
+        <span>＋</span>发起新对话
+      </button>
+
+      <section class="history-list">
+        <p class="panel-caption">最近对话</p>
+        <button
+          v-for="session in sessions"
+          :key="session.id"
+          :class="['history-item', { active: session.id === identity.conversationId }]"
+          @click="selectConversation(session)"
+        >
+          <span class="history-icon">{{ session.id === identity.conversationId ? '●' : '○' }}</span>
+          <span>
+            <strong>{{ session.title }}</strong>
+            <small>{{ session.updatedAt }}</small>
+          </span>
+        </button>
+        <p v-if="sessions.length === 0" class="history-empty">完成第一次咨询后，会话会保存在这里。</p>
       </section>
 
-      <a class="profile-card" href="https://xhslink.com/m/558VOQs4Otc" target="_blank" rel="noreferrer">
-        <span>我的主页</span>
-        <strong>小红书 69.6K 次赞与收藏</strong>
-        <em>来看看我的主页 &gt;&gt;</em>
-      </a>
-
-      <section class="panel">
-        <div class="panel-heading">
-          <h2>后端</h2>
-          <span class="pill">{{ currentBackend.label }}</span>
-        </div>
-        <div class="segmented">
-          <button :class="{ active: settings.backend === 'java' }" @click="switchBackend('java')">Java</button>
-          <button :class="{ active: settings.backend === 'python' }" @click="switchBackend('python')">Python</button>
-        </div>
-
-        <label>
-          <span>Java API</span>
-          <input v-model="settings.endpoints.java" @change="persist" placeholder="/api/java" />
-        </label>
-        <label>
-          <span>Python API</span>
-          <input v-model="settings.endpoints.python" @change="persist" placeholder="/api/python" />
-        </label>
-        <label>
-          <span>用户 ID</span>
-          <input v-model="settings.userId" @change="persist" placeholder="u1001" />
-        </label>
-        <label>
-          <span>会话 ID</span>
-          <input v-model="settings.conversationId" @change="persist" placeholder="自动生成" />
-        </label>
-
-        <div class="actions">
-          <button @click="checkHealth">健康检查</button>
-          <button @click="loadStats">刷新状态</button>
-        </div>
-      </section>
-
-      <section class="panel status-panel">
-        <div class="panel-heading">
-          <h2>状态</h2>
-          <span :class="['status-dot', healthOk ? 'online' : 'offline']"></span>
-        </div>
-        <dl>
-          <div>
-            <dt>当前后端</dt>
-            <dd>{{ currentBackend.label }}</dd>
-          </div>
-          <div>
-            <dt>健康状态</dt>
-            <dd :class="healthOk ? 'ok' : 'muted'">{{ healthLabel }}</dd>
-          </div>
-          <div>
-            <dt>知识片段</dt>
-            <dd>{{ knowledgeCount }}</dd>
-          </div>
-        </dl>
-        <pre v-if="statusText">{{ statusText }}</pre>
-      </section>
+      <div class="employee-card">
+        <div class="employee-avatar">员</div>
+        <div><strong>当前员工</strong><small>{{ identity.userId }}</small></div>
+        <span class="presence-dot" title="在线"></span>
+      </div>
     </aside>
 
-    <section class="workspace">
-      <header class="workspace-header">
+    <section class="chat-workspace">
+      <header class="chat-header">
         <div>
-          <span class="eyebrow">EchoMind Workspace</span>
-          <h2>对话调试</h2>
-          <p>{{ currentBackend.baseUrl }}</p>
+          <h1>智能客服</h1>
+          <p><span :class="['service-dot', { online: serviceOnline }]"></span>{{ serviceOnline ? '服务在线' : '正在连接服务' }}</p>
         </div>
-        <div class="header-actions">
-          <a class="profile-link" href="https://xhslink.com/m/558VOQs4Otc" target="_blank" rel="noreferrer">小红书主页</a>
-          <a :href="docsUrl" target="_blank" rel="noreferrer">API 文档</a>
-        </div>
+        <button class="header-button" @click="newConversation">新对话</button>
       </header>
 
-      <section class="chat-panel">
-        <div class="messages" ref="messageList">
-          <article v-for="item in messages" :key="item.id" :class="['message', item.role]">
-            <div class="message-meta">
-              <span>{{ item.role === 'user' ? '用户' : currentBackend.label }}</span>
-              <small v-if="item.meta">{{ item.meta }}</small>
+      <div ref="messageList" class="message-list" aria-live="polite">
+        <section v-if="messages.length === 0" class="welcome">
+          <div class="assistant-symbol" aria-hidden="true">
+            <span></span><span></span><i></i>
+          </div>
+          <p>{{ greeting }}，{{ identity.userId }}</p>
+          <h2>今天有什么可以帮你？</h2>
+          <span>直接描述遇到的问题，我会结合企业内部资料为你解答，并协助处理相关事项。</span>
+        </section>
+
+        <article v-for="item in messages" :key="item.id" :class="['message', item.role]">
+          <div v-if="item.role === 'assistant'" class="assistant-avatar" aria-hidden="true">
+            <span></span><span></span><i></i>
+          </div>
+          <div class="message-content">
+            <div class="message-heading">
+              <strong>{{ item.role === 'assistant' ? '智能客服' : '我' }}</strong>
+              <time>{{ item.time }}</time>
             </div>
             <p>{{ item.content }}</p>
-          </article>
-          <div v-if="messages.length === 0" class="empty-state">
-            <h3>开始一次客服对话</h3>
-            <p>可切换 Java 或 Python 后端，前端会自动适配响应字段。</p>
+
+            <button
+              v-if="item.result?.sources?.length"
+              class="reference-link"
+              @click="showReferences(item.result.sources)"
+            >
+              <span>▤</span>查看参考资料（{{ item.result.sources.length }}）
+            </button>
+
+            <section v-if="item.result?.confirmation" class="confirmation-card">
+              <div class="confirmation-title">
+                <div class="document-icon">✓</div>
+                <div>
+                  <strong>{{ item.result.confirmation.title }}</strong>
+                  <p>{{ item.result.confirmation.description }}</p>
+                </div>
+              </div>
+              <dl>
+                <div v-for="field in item.result.confirmation.fields" :key="field.label">
+                  <dt>{{ field.label }}</dt><dd>{{ field.value }}</dd>
+                </div>
+              </dl>
+              <div class="confirmation-actions">
+                <button :disabled="busy" @click="handleConfirmation(item, 'confirm')">
+                  {{ item.result.confirmation.confirm_label }}
+                </button>
+                <button class="plain" :disabled="busy" @click="handleConfirmation(item, 'cancel')">
+                  {{ item.result.confirmation.cancel_label }}
+                </button>
+              </div>
+            </section>
+
+            <section v-if="item.result?.receipt" class="receipt-card">
+              <span class="receipt-check">✓</span>
+              <div><strong>{{ item.result.receipt.message }}</strong><small>可在相关业务系统中继续查看处理进度</small></div>
+            </section>
+
+            <div v-if="item.error" class="error-message">
+              <strong>消息发送失败</strong><span>{{ item.error }}，请稍后重试。</span>
+            </div>
+          </div>
+        </article>
+
+        <div v-if="busy" class="message assistant pending-message">
+          <div class="assistant-avatar" aria-hidden="true"><span></span><span></span><i></i></div>
+          <div class="typing"><span></span><span></span><span></span></div>
+        </div>
+      </div>
+
+      <form class="composer" @submit.prevent="sendMessage">
+        <div class="composer-box">
+          <textarea
+            v-model="draft"
+            rows="2"
+            aria-label="输入消息"
+            placeholder="请输入你的问题"
+            @keydown.enter.exact.prevent="sendMessage"
+          ></textarea>
+          <div class="composer-footer">
+            <span>内容可能存在偏差，重要事项请以企业正式制度为准</span>
+            <button :disabled="busy || !draft.trim()" aria-label="发送消息">↑</button>
           </div>
         </div>
-
-        <form class="composer" @submit.prevent="sendMessage">
-          <textarea v-model="draft" rows="3" placeholder="输入问题，例如：我想申请退款，订单号是 #12345"></textarea>
-          <button :disabled="busy || !draft.trim()">{{ busy ? '发送中' : '发送' }}</button>
-        </form>
-      </section>
-
-      <section class="tools-grid">
-        <article class="tool-panel">
-          <div class="panel-heading">
-            <h2>知识库检索</h2>
-            <span class="pill soft">RAG</span>
-          </div>
-          <div class="inline-form">
-            <input v-model="searchQuery" placeholder="退款多久能到账" />
-            <button @click="searchKnowledge" :disabled="busy || !searchQuery.trim()">检索</button>
-          </div>
-          <div class="result-list">
-            <article v-for="item in searchResults" :key="item.id || item.title" class="result-item">
-              <strong>{{ item.title || '未命名结果' }}</strong>
-              <span>score {{ item.score ?? '-' }}</span>
-              <p>{{ item.content }}</p>
-            </article>
-          </div>
-        </article>
-
-        <article class="tool-panel">
-          <div class="panel-heading">
-            <h2>导入知识</h2>
-            <span class="pill soft">Docs</span>
-          </div>
-          <label>
-            <span>标题</span>
-            <input v-model="docTitle" placeholder="退款补充政策" />
-          </label>
-          <label>
-            <span>内容</span>
-            <textarea v-model="docContent" rows="5" placeholder="输入知识库内容"></textarea>
-          </label>
-          <div class="actions">
-            <button @click="submitKnowledge" :disabled="busy || !docTitle.trim() || !docContent.trim()">添加文档</button>
-            <label class="file-button">
-              上传文件
-              <input type="file" accept=".txt,.md,.json" @change="handleUpload" />
-            </label>
-          </div>
-        </article>
-      </section>
+      </form>
     </section>
+
+    <aside v-if="referencesOpen" class="reference-panel">
+      <header>
+        <div><strong>参考资料</strong><span>本次回答使用的企业内部资料</span></div>
+        <button aria-label="关闭参考资料" @click="referencesOpen = false">×</button>
+      </header>
+      <div class="reference-list">
+        <article v-for="(source, index) in activeReferences" :key="`${source.title}-${index}`">
+          <div class="source-number">{{ index + 1 }}</div>
+          <div><strong>{{ source.title }}</strong><p>{{ source.excerpt }}</p></div>
+        </article>
+      </div>
+      <footer>资料内容由知识库统一维护，更新时间以原始文档为准。</footer>
+    </aside>
   </main>
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
-import {
-  addKnowledge,
-  backendMeta,
-  createInitialSettings,
-  requestChat,
-  requestHealth,
-  requestKnowledgeStats,
-  requestMonitor,
-  requestSearch,
-  saveSettings,
-  uploadKnowledge
-} from './lib/backends'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { confirmRequest, createIdentity, requestChat, requestHealth } from './lib/backends'
 
-const settings = reactive(createInitialSettings())
+const identity = reactive(createIdentity())
+const sessions = ref(readSessions())
 const messages = ref([])
 const draft = ref('')
 const busy = ref(false)
-const healthOk = ref(false)
-const healthLabel = ref('未检查')
-const statusText = ref('')
-const knowledgeCount = ref('-')
-const searchQuery = ref('退款多久能到账')
-const searchResults = ref([])
-const docTitle = ref('退款补充政策')
-const docContent = ref('大促期间退款审核时间可能延长到 3-5 个工作日。')
+const serviceOnline = ref(false)
+const referencesOpen = ref(false)
+const activeReferences = ref([])
 const messageList = ref(null)
 
-const currentBackend = computed(() => backendMeta(settings.backend, settings))
-const docsUrl = computed(() => {
-  if (settings.backend === 'java') return `${currentBackend.value.baseUrl}/docs`
-  return `${currentBackend.value.baseUrl}/docs`
+const greeting = computed(() => {
+  const hour = new Date().getHours()
+  if (hour < 11) return '上午好'
+  if (hour < 14) return '中午好'
+  if (hour < 18) return '下午好'
+  return '晚上好'
 })
 
-watch(
-  () => settings.conversationId,
-  () => persist()
-)
-
-onMounted(() => {
-  checkHealth()
-  loadStats()
+onMounted(async () => {
+  try {
+    serviceOnline.value = (await requestHealth()).status === 'ok'
+  } catch {
+    serviceOnline.value = false
+  }
 })
-
-function switchBackend(type) {
-  settings.backend = type
-  persist()
-  healthOk.value = false
-  healthLabel.value = '未检查'
-  statusText.value = ''
-  searchResults.value = []
-  checkHealth()
-}
-
-function persist() {
-  saveSettings(settings)
-}
 
 async function sendMessage() {
   const content = draft.value.trim()
-  if (!content) return
-  messages.value.push({ id: crypto.randomUUID(), role: 'user', content })
+  if (!content || busy.value) return
+  messages.value.push({ id: crypto.randomUUID(), role: 'user', content, time: currentTime() })
   draft.value = ''
   busy.value = true
+  saveCurrentSession()
+  await scrollToEnd()
   try {
-    const response = await requestChat(settings.backend, settings, content)
-    if (response.conversationId && !settings.conversationId) {
-      settings.conversationId = response.conversationId
-      persist()
-    }
-    const meta = [
-      response.intent,
-      response.agentType,
-      response.knowledgeUsed ? 'RAG' : '',
-      response.escalated ? '转人工' : ''
-    ].filter(Boolean).join(' · ')
+    const result = await requestChat(identity, content)
+    identity.conversationId = result.conversation_id || identity.conversationId
     messages.value.push({
-      id: crypto.randomUUID(),
-      role: 'assistant',
-      content: response.response,
-      meta
+      id: crypto.randomUUID(), role: 'assistant', content: result.answer || '你的消息已经收到。',
+      result, time: currentTime()
     })
+    serviceOnline.value = true
   } catch (error) {
     messages.value.push({
-      id: crypto.randomUUID(),
-      role: 'assistant',
-      content: error.message,
-      meta: '请求失败'
+      id: crypto.randomUUID(), role: 'assistant', content: '这条消息暂时没有处理完成。',
+      error: error.message, time: currentTime()
     })
   } finally {
     busy.value = false
-    await nextTick()
-    messageList.value?.scrollTo({ top: messageList.value.scrollHeight, behavior: 'smooth' })
+    saveCurrentSession()
+    await scrollToEnd()
   }
 }
 
-async function checkHealth() {
-  try {
-    const data = await requestHealth(settings.backend, settings)
-    healthOk.value = data.status === 'ok'
-    healthLabel.value = data.status || 'ok'
-    statusText.value = JSON.stringify(data, null, 2)
-  } catch (error) {
-    healthOk.value = false
-    healthLabel.value = '不可用'
-    statusText.value = error.message
-  }
-}
-
-async function loadStats() {
-  try {
-    const [stats, monitor] = await Promise.allSettled([
-      requestKnowledgeStats(settings.backend, settings),
-      requestMonitor(settings.backend, settings)
-    ])
-    if (stats.status === 'fulfilled') {
-      knowledgeCount.value = stats.value.total_chunks ?? stats.value.totalChunks ?? '-'
-    }
-    if (monitor.status === 'fulfilled') {
-      statusText.value = JSON.stringify(monitor.value, null, 2)
-    }
-  } catch (error) {
-    statusText.value = error.message
-  }
-}
-
-async function searchKnowledge() {
+async function handleConfirmation(item, action) {
+  if (busy.value) return
   busy.value = true
   try {
-    const data = await requestSearch(settings.backend, settings, searchQuery.value, 5)
-    searchResults.value = data.results || []
+    const result = await confirmRequest(item.result.request_id, action)
+    item.result = result
+    item.content = result.answer || (action === 'confirm' ? '申请已经提交。' : '已取消提交。')
+    item.time = currentTime()
   } catch (error) {
-    statusText.value = error.message
+    item.error = error.message
   } finally {
     busy.value = false
+    saveCurrentSession()
+    await scrollToEnd()
   }
 }
 
-async function submitKnowledge() {
-  busy.value = true
+function showReferences(sources) {
+  activeReferences.value = sources
+  referencesOpen.value = true
+}
+
+function newConversation() {
+  saveCurrentSession()
+  identity.conversationId = crypto.randomUUID()
+  messages.value = []
+  referencesOpen.value = false
+}
+
+function selectConversation(session) {
+  saveCurrentSession()
+  identity.conversationId = session.id
+  messages.value = JSON.parse(JSON.stringify(session.messages || []))
+  referencesOpen.value = false
+  scrollToEnd()
+}
+
+function saveCurrentSession() {
+  if (!messages.value.length) return
+  const firstQuestion = messages.value.find(item => item.role === 'user')?.content || '新对话'
+  const record = {
+    id: identity.conversationId,
+    title: firstQuestion.length > 18 ? `${firstQuestion.slice(0, 18)}…` : firstQuestion,
+    updatedAt: currentTime(),
+    messages: JSON.parse(JSON.stringify(messages.value))
+  }
+  const index = sessions.value.findIndex(item => item.id === record.id)
+  if (index >= 0) sessions.value.splice(index, 1)
+  sessions.value.unshift(record)
+  sessions.value = sessions.value.slice(0, 20)
+  localStorage.setItem('employee-service.sessions', JSON.stringify(sessions.value))
+}
+
+function readSessions() {
   try {
-    const data = await addKnowledge(settings.backend, settings, [
-      { title: docTitle.value.trim(), content: docContent.value.trim() }
-    ])
-    statusText.value = JSON.stringify(data, null, 2)
-    await loadStats()
-  } catch (error) {
-    statusText.value = error.message
-  } finally {
-    busy.value = false
+    return JSON.parse(localStorage.getItem('employee-service.sessions') || '[]')
+  } catch {
+    return []
   }
 }
 
-async function handleUpload(event) {
-  const file = event.target.files?.[0]
-  event.target.value = ''
-  if (!file) return
-  busy.value = true
-  try {
-    const data = await uploadKnowledge(settings.backend, settings, file)
-    statusText.value = JSON.stringify(data, null, 2)
-    await loadStats()
-  } catch (error) {
-    statusText.value = error.message
-  } finally {
-    busy.value = false
-  }
+function currentTime() {
+  return new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date())
+}
+
+async function scrollToEnd() {
+  await nextTick()
+  messageList.value?.scrollTo({ top: messageList.value.scrollHeight, behavior: 'smooth' })
 }
 </script>

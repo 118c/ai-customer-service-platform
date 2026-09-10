@@ -1,104 +1,21 @@
-# EchoMind Frontend
+# 企业员工智能客服 Web
 
-独立 Vue 前端项目，可同时连接 EchoMind Python 版本和 EchoMind Java 版本。
-
-项目目录：
-
-```text
-/Users/xiao_xiong/Desktop/code/EchoMindFrontend
-```
-
-## 功能
-
-- 在页面中切换 Java / Python 后端。
-- 统一适配 `/chat` 响应字段：
-  - Python：`conv_id`、`agent_type`、`latency_ms`
-  - Java：`conversation_id`、`agent_type`、`latency_ms`
-- 支持聊天调试、健康检查、监控摘要、知识库检索、知识库文档导入、文件上传。
-- 支持 Docker + Nginx 部署。
-
-## 默认后端地址
-
-| 后端 | 默认地址 |
-|------|----------|
-| Python | `http://localhost:8000` |
-| Java | `http://localhost:8080` |
-
-开发模式下，Vite 会代理：
-
-| 前端路径 | 代理到 |
-|----------|--------|
-| `/api/python` | `http://localhost:8000` |
-| `/api/java` | `http://localhost:8080` |
-
-Docker 模式下，Nginx 会通过 `host.docker.internal` 访问宿主机上的 Python / Java 服务。
+基于 Vue 3 的员工端自然语言服务界面。页面只呈现员工需要使用的信息：对话、资料依据、业务确认与办理回执；内部意图判断、Agent 路由、模型状态和检索分数由后端运维接口承载。
 
 ## 本地运行
 
-安装依赖：
-
 ```bash
 npm install
-```
-
-启动：
-
-```bash
 npm run dev
 ```
 
-访问：
+访问 `http://localhost:5173`。开发服务器默认将 `/api` 转发到 `http://localhost:8000`，也可通过 `VITE_API_URL` 指向其他服务地址。员工身份优先读取网关注入的 `window.__EMPLOYEE_CONTEXT__.employeeId`，其次读取 `VITE_EMPLOYEE_ID`；本地未配置时使用参考工号 `E1001`。
 
-```text
-http://localhost:5173
-```
-
-如果后端端口不是默认值，可以启动时覆盖：
-
-```bash
-VITE_PYTHON_API_URL=http://localhost:8000 \
-VITE_JAVA_API_URL=http://localhost:8080 \
-npm run dev
-```
-
-## Docker 部署
-
-先构建前端静态文件：
+## 生产构建
 
 ```bash
 npm run build
-```
-
-再构建并启动容器：
-
-```bash
 docker compose up -d --build
 ```
 
-访问：
-
-```text
-http://localhost:5174
-```
-
-停止：
-
-```bash
-docker compose down
-```
-
-## 后端启动参考
-
-Python 版默认：
-
-```text
-http://localhost:8000
-```
-
-Java 版默认：
-
-```text
-http://localhost:8080
-```
-
-两个后端不需要同时启动。前端页面里选择当前要调试的后端即可。
+Nginx 提供静态资源并转发 `/api`。身份信息与访问凭证应由企业 SSO 或网关注入，不在浏览器界面中配置。
