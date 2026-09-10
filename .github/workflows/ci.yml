@@ -15,16 +15,7 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - name: Run pytest
-        shell: bash
-        run: |
-          set +e
-          pytest 2>&1 | tee /tmp/pytest-output.log
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
-            message=$(tail -c 50000 /tmp/pytest-output.log | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')
-            echo "::error title=pytest failure::$message"
-          fi
-          exit "$status"
+        run: python -m pytest
 
   frontend:
     runs-on: ubuntu-latest
