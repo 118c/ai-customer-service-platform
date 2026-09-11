@@ -81,6 +81,7 @@ def build_trace(result: Dict[str, Any], model_provider: str = "") -> Dict[str, A
             "review_decision": result.get("review_decision", {}),
             "result": result.get("action_result", {}),
         },
+        "degradation_events": result.get("degradation_events", []),
         "model_provider": model_provider,
         "latency_ms": round(float(result.get("latency_ms", 0.0)), 1),
     }

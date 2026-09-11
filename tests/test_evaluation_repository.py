@@ -16,6 +16,8 @@ def test_evaluation_repository_persists_runs_and_trends(tmp_path):
         "results": [{
             "case_id": "rag-1", "passed": True, "latency_ms": 20.0,
             "checks": {"intent": True}, "metrics": {"recall@3": 1.0}, "detail": "",
+            "request_ids": ["request-1"], "trace_ids": ["request-1"],
+            "metadata": {"conversation_id": "conversation-1"},
         }],
     }
     repository.save_run(run)
@@ -24,4 +26,7 @@ def test_evaluation_repository_persists_runs_and_trends(tmp_path):
     assert loaded is not None
     assert loaded["metrics"]["recall@3"] == 1.0
     assert loaded["results"][0]["checks"]["intent"] is True
+    assert loaded["results"][0]["request_ids"] == ["request-1"]
+    assert loaded["results"][0]["trace_ids"] == ["request-1"]
     assert repository.trends()[0]["dataset_version"] == "2026.09"
+    assert repository.failures("run-1") == []

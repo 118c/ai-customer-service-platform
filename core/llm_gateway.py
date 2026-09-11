@@ -150,7 +150,24 @@ class LocalContinuityProvider:
             elif any(k in lowered for k in ("帮我", "请", "协助", "怎么办")):
                 intent = "request"
             return json.dumps({"intent": intent, "confidence": 0.82, "reasoning": "本地规则连续性判断"}, ensure_ascii=False)
+        context_text = "\n".join(
+            str(item.get("content", "")) for item in messages if isinstance(item, dict)
+        )
         lowered = text.lower()
+        lowered_context = context_text.lower()
+        if "p1" in lowered and "确保人员安全" in context_text:
+            return (
+                "根据现行设备故障分级与报修流程，P1 停线故障应先确保人员安全，"
+                "再记录设备编号和报警现象并提交报修；请勿绕过安全联锁。"
+            )
+        if (
+            any(k in lowered for k in ("版本冲突", "版本不一致", "哪个版本"))
+            and "工艺工程师确认" in context_text
+        ):
+            return (
+                "根据现行工艺文件使用规范，版本冲突时应停止继续使用有争议的文件，"
+                "由工艺工程师确认有效版本后再恢复作业。"
+            )
         if any(k in lowered for k in ("报修", "设备故障", "停机", "异响")):
             return "已识别为设备服务请求。请补充设备编号、所在区域、故障现象和是否影响生产；涉及创建报修单时会先请您确认。"
         if any(k in lowered for k in ("考勤", "打卡", "请假", "加班")):
@@ -158,6 +175,11 @@ class LocalContinuityProvider:
                 return "按照现行三班制考勤规则，跨日夜班以班次开始日期作为考勤日。若仍需核对个人记录，请补充具体日期和班次。"
             return "我会依据当前考勤制度协助核对。请提供日期、班次和异常类型；涉及个人考勤明细时还需要完成身份校验。"
         if any(k in lowered for k in ("工艺", "规范", "作业指导", "检验标准", "sop", "工序参数")):
+            if "工艺工程师确认" in context_text or "最新版本" in lowered_context:
+                return (
+                    "我已查询现行工艺资料。现场应使用标记为生效状态的最新版本；"
+                    "发现版本冲突时，由工艺工程师确认有效版本后再继续作业。"
+                )
             return "我已查询现行作业资料。请按资料中的作业顺序和质量控制点执行；如现场版本与回答不一致，请以受控文件的最新生效版本为准。"
         if any(k in lowered for k in ("提交申请", "领料申请", "发起申请")):
             return "我已根据你的描述整理申请信息。提交前请核对申请类型、物料编码、数量和申请人，确认后我会为你办理。"

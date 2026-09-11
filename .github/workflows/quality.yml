@@ -19,7 +19,9 @@ jobs:
         run: >-
           python -m pytest -q
           tests/test_full_workflow_evaluator.py
+          tests/test_workflow_quality_gate.py
           tests/test_rag_metrics.py
+          tests/test_rag_evaluator.py
           tests/test_agent_isolation.py
           tests/test_monitoring_feedback.py
           tests/test_memory_fallback.py

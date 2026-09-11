@@ -30,7 +30,7 @@ class KnowledgeBase:
     时自动生成向量，不需要下载模型或调用外部 Embedding API。
     """
 
-    COLLECTION_NAME = "enterprise_knowledge_v1"
+    COLLECTION_NAME = "enterprise_knowledge_v2"
 
     def __init__(
         self,
@@ -203,6 +203,9 @@ class KnowledgeBase:
         """导入默认知识库文档（客服场景常见问题）。"""
         default_docs = [
             {
+                "document_id": "policy-attendance-v1",
+                "version": "1.0",
+                "effective_date": "2026-01-01",
                 "title": "三班制考勤与交接规范",
                 "content": (
                     "A班 08:00-16:00，B班 16:00-24:00，C班 00:00-08:00。"
@@ -211,6 +214,9 @@ class KnowledgeBase:
                 ),
             },
             {
+                "document_id": "policy-leave-overtime-v1",
+                "version": "1.0",
+                "effective_date": "2026-01-01",
                 "title": "请假与加班申请制度",
                 "content": (
                     "普通请假应提前一个工作日提交；紧急情况应先通知班组长，并在返岗后补齐材料。"
@@ -219,6 +225,9 @@ class KnowledgeBase:
                 ),
             },
             {
+                "document_id": "equipment-repair-v1",
+                "version": "1.0",
+                "effective_date": "2026-01-01",
                 "title": "设备故障分级与报修流程",
                 "content": (
                     "设备故障分为P1停线、P2降速、P3一般异常。发现人应先确保人员安全，"
@@ -227,6 +236,9 @@ class KnowledgeBase:
                 ),
             },
             {
+                "document_id": "process-governance-v1",
+                "version": "1.0",
+                "effective_date": "2026-01-01",
                 "title": "工艺文件使用规范",
                 "content": (
                     "现场作业必须使用知识库中标记为生效状态的最新版本工艺文件。"
@@ -235,6 +247,9 @@ class KnowledgeBase:
                 ),
             },
             {
+                "document_id": "workflow-approval-v1",
+                "version": "1.0",
+                "effective_date": "2026-01-01",
                 "title": "企业流程审批规则",
                 "content": (
                     "系统支持查询请假、领料、设备停机与工艺变更流程。查询需提供申请单号。"
@@ -243,6 +258,9 @@ class KnowledgeBase:
                 ),
             },
             {
+                "document_id": "security-handoff-v1",
+                "version": "1.0",
+                "effective_date": "2026-01-01",
                 "title": "人工协同与信息安全",
                 "content": (
                     "低置信度、多部门争议、涉及人身安全、停线、薪资争议或权限变更的请求应升级人工。"

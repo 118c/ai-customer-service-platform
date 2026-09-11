@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -41,6 +42,11 @@ class FaultInjectingBusinessGateway:
         self.controller = _FaultController(rules)
         self.query_calls = 0
         self.execute_calls = 0
+        self.successful_writes = 0
+        self.idempotency_hit_count = 0
+        self.duplicate_write_count = 0
+        self.execute_latencies_ms: list[float] = []
+        self._records_by_key: dict[str, str] = {}
 
     async def query(self, action_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.query_calls += 1
@@ -49,8 +55,23 @@ class FaultInjectingBusinessGateway:
 
     async def execute(self, action: Any) -> dict[str, Any]:
         self.execute_calls += 1
-        await self.controller.apply("business.execute")
-        return await self.delegate.execute(action)
+        started = time.monotonic()
+        try:
+            await self.controller.apply("business.execute")
+            result = await self.delegate.execute(action)
+        finally:
+            self.execute_latencies_ms.append((time.monotonic() - started) * 1000)
+        if result.get("success"):
+            self.successful_writes += 1
+            if result.get("idempotent_replay"):
+                self.idempotency_hit_count += 1
+            key = str(getattr(action, "idempotency_key", ""))
+            record_id = str(result.get("record_id", ""))
+            if key and key in self._records_by_key and self._records_by_key[key] != record_id:
+                self.duplicate_write_count += 1
+            if key:
+                self._records_by_key[key] = record_id
+        return result
 
     async def list_tasks(self, limit: int = 20) -> list[dict[str, Any]]:
         await self.controller.apply("business.list_tasks")

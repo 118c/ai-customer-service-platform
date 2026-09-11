@@ -1,0 +1,5 @@
+{"case_id":"business-approval-confirm-001","action":"workflow.submit","confirmation":"confirm","expected_receipt":true,"duplicate_write_count":0}
+{"case_id":"business-approval-cancel-001","action":"workflow.submit","confirmation":"cancel","expected_receipt":false,"cancelled_write_count":0}
+{"case_id":"business-approval-edit-001","action":"workflow.submit","confirmation":"edit","changes":{"material_code":"MAT-1008","quantity":20},"expected_receipt":true}
+{"case_id":"business-repair-idempotency-001","action":"repair.create","confirmation":"confirm","repeat":2,"duplicate_write_count":0}
+{"case_id":"business-resume-idempotency-001","action":"workflow.submit","confirmation":"confirm","repeat_resume":true,"duplicate_write_count":0}

@@ -25,6 +25,20 @@ async def test_local_provider_handles_approval_request():
     assert '"intent": "approval_request"' in raw
 
 
+async def test_local_provider_grounds_continuity_answer_in_retrieved_context():
+    provider = LocalContinuityProvider()
+    raw = await provider.complete(
+        system="你是设备技术服务专家。",
+        messages=[
+            {"role": "user", "content": "[背景信息]\nP1停线。发现人应先确保人员安全。"},
+            {"role": "assistant", "content": "好的，我已了解背景信息。"},
+            {"role": "user", "content": "P1停线故障应该先做什么？"},
+        ],
+    )
+    assert "确保人员安全" in raw
+    assert "直接复位安全联锁" not in raw
+
+
 async def test_factory_intent_baseline_is_reproducible():
     gateway = ResilientLLMGateway([LocalContinuityProvider()])
     recognizer = IntentRecognizer(api_key="offline", llm_gateway=gateway)

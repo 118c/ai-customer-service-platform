@@ -57,6 +57,13 @@ def grounded_fact_score(answer: str, evidence: Sequence[str], expected_facts: Se
     return supported / len(facts)
 
 
+def answer_relevance_score(answer: str, expected_facts: Sequence[str]) -> float:
+    facts = [fact.strip() for fact in expected_facts if fact.strip()]
+    if not facts:
+        return 1.0 if answer.strip() else 0.0
+    return sum(1 for fact in facts if fact in answer) / len(facts)
+
+
 def retrieval_metrics(retrieved: Sequence[str], relevant: Sequence[str], k: int = 3) -> dict[str, float]:
     return {
         f"recall@{k}": round(recall_at_k(retrieved, relevant, k), 4),

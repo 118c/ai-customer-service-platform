@@ -43,20 +43,31 @@ function metricLabel(name) {
   return ({
     'recall@3': '召回率', mrr: '首条命中', 'ndcg@3': '排序质量',
     citation_precision: '引用准确率', citation_recall: '引用覆盖率',
-    answer_faithfulness: '事实支撑度', controlled_degradation: '受控降级',
+    answer_faithfulness: '事实支撑度', faithfulness: '答案忠实度',
+    faithfulness_rule: '规则忠实度', faithfulness_judge: '模型忠实度',
+    answer_relevance: '答案相关性', answer_relevance_rule: '规则相关性',
+    answer_relevance_judge: '模型相关性', controlled_degradation: '受控降级',
     latency_p50_ms: '中位耗时', latency_p95_ms: '长尾耗时',
     workflow_success_rate: '流程通过率', failure_rate: '失败率',
-    business_success_rate: '业务受理率', review_flow_success_rate: '确认流程完整度'
+    business_success_rate: '业务受理率', business_action_success_rate: '业务操作成功率',
+    business_action_latency_ms: '业务操作耗时', confirmation_success_rate: '确认成功率',
+    workflow_resume_success_rate: '恢复成功率', review_flow_success_rate: '确认流程完整度',
+    cancelled_write_count: '取消后写入数', duplicate_write_count: '重复写入数',
+    idempotency_hit_count: '幂等命中数'
   })[name] || name
 }
 
 function metricValue(name, value) {
-  return name.endsWith('_ms') ? `${Math.round(Number(value || 0))} ms` : percent(value)
+  if (name.endsWith('_ms')) return `${Math.round(Number(value || 0))} ms`
+  if (name.endsWith('_count')) return String(Math.round(Number(value || 0)))
+  return percent(value)
 }
 
 function metricWidth(name, value) {
   return name.endsWith('_ms')
     ? `${Math.min(100, Math.round(Number(value || 0) / 200))}%`
+    : name.endsWith('_count')
+      ? `${Math.min(100, Math.round(Number(value || 0) * 20))}%`
     : percent(value)
 }
 
@@ -112,6 +123,23 @@ async function runEvaluation() {
   }
 }
 
+async function runRagEvaluation() {
+  running.value = true
+  error.value = ''
+  try {
+    const report = await requestOperations('/admin/evaluations/rag/run', adminKey.value, {
+      method: 'POST', body: JSON.stringify({ dataset_version: '2026.09' })
+    })
+    selected.value = report
+    await refresh()
+    selected.value = report
+  } catch (reason) {
+    error.value = reason.message
+  } finally {
+    running.value = false
+  }
+}
+
 onMounted(() => {
   if (adminKey.value || location.hostname === 'localhost' || location.hostname === '127.0.0.1') refresh()
 })
@@ -140,6 +168,7 @@ onMounted(() => {
       <div class="ops-actions">
         <span class="live-state"><b></b>数据已连接</span>
         <button class="quiet-button" :disabled="loading" @click="refresh">刷新</button>
+        <button class="quiet-button" :disabled="running" @click="runRagEvaluation">运行知识评测</button>
         <button class="run-button" :disabled="running" @click="runEvaluation">
           {{ running ? '正在执行完整链路' : '运行完整评测' }}
         </button>
@@ -177,7 +206,7 @@ onMounted(() => {
             :class="{ active: selected?.run_id === run.run_id }" @click="openRun(run.run_id)"
           >
             <i :class="{ pass: run.pass_rate === 1 }"></i>
-            <span><strong>{{ formatTime(run.completed_at) }}</strong><small>数据集 {{ run.dataset_version }}</small></span>
+            <span><strong>{{ formatTime(run.completed_at) }}</strong><small>{{ run.suite === 'rag' ? '知识评测' : '完整链路' }} · {{ run.dataset_version }}</small></span>
             <b>{{ percent(run.pass_rate) }}</b>
           </button>
         </section>

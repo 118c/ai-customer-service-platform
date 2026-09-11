@@ -1,0 +1,5 @@
+{"case_id":"resilience-model-timeout-001","component":"intent.recognize","mode":"timeout","expected_status":"completed","expected_unhandled_errors":0}
+{"case_id":"resilience-agent-failure-001","component":"agent.execute","mode":"error","expected_status":"completed","expected_unhandled_errors":0}
+{"case_id":"resilience-rag-timeout-001","component":"knowledge.search","mode":"timeout","expected_status":"completed","expected_public_citations":0}
+{"case_id":"resilience-memory-write-001","component":"memory.write","mode":"error","expected_status":"completed","expected_unhandled_errors":0}
+{"case_id":"resilience-business-timeout-001","component":"business.execute","mode":"timeout","expected_status":"completed","expected_duplicate_writes":0}

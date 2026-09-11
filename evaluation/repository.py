@@ -32,13 +32,21 @@ class EvaluationRepository:
                 CREATE TABLE IF NOT EXISTS evaluation_case_results (
                     run_id TEXT NOT NULL, case_id TEXT NOT NULL, passed INTEGER NOT NULL,
                     latency_ms REAL NOT NULL, checks TEXT NOT NULL, metrics TEXT NOT NULL,
-                    detail TEXT NOT NULL, PRIMARY KEY (run_id, case_id),
+                    detail TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY (run_id, case_id),
                     FOREIGN KEY (run_id) REFERENCES evaluation_runs(run_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_eval_runs_completed
                     ON evaluation_runs(completed_at DESC);
                 """
             )
+            columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(evaluation_case_results)").fetchall()
+            }
+            if "metadata" not in columns:
+                db.execute(
+                    "ALTER TABLE evaluation_case_results ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'"
+                )
 
     def save_run(self, run: Any) -> str:
         data = asdict(run) if is_dataclass(run) else dict(run)
@@ -57,14 +65,18 @@ class EvaluationRepository:
             db.execute("DELETE FROM evaluation_case_results WHERE run_id = ?", (data["run_id"],))
             for item in data.get("results", []):
                 result = asdict(item) if is_dataclass(item) else dict(item)
+                case_metadata = dict(result.get("metadata", {}))
+                case_metadata["request_ids"] = list(result.get("request_ids", []))
+                case_metadata["trace_ids"] = list(result.get("trace_ids", []))
                 db.execute(
                     """INSERT INTO evaluation_case_results
-                       (run_id, case_id, passed, latency_ms, checks, metrics, detail)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                       (run_id, case_id, passed, latency_ms, checks, metrics, detail, metadata)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         data["run_id"], result["case_id"], int(bool(result.get("passed"))),
                         float(result.get("latency_ms", 0.0)), self._json(result.get("checks", {})),
                         self._json(result.get("metrics", {})), result.get("detail", ""),
+                        self._json(case_metadata),
                     ),
                 )
         return data["run_id"]
@@ -92,14 +104,17 @@ class EvaluationRepository:
                 "SELECT * FROM evaluation_case_results WHERE run_id = ? ORDER BY case_id", (run_id,)
             ).fetchall()
         result = self._run_row(row)
-        result["results"] = [
-            {
+        result["results"] = []
+        for item in cases:
+            metadata = json.loads(item["metadata"] or "{}")
+            result["results"].append({
                 "case_id": item["case_id"], "passed": bool(item["passed"]),
                 "latency_ms": item["latency_ms"], "checks": json.loads(item["checks"]),
                 "metrics": json.loads(item["metrics"]), "detail": item["detail"],
-            }
-            for item in cases
-        ]
+                "request_ids": metadata.pop("request_ids", []),
+                "trace_ids": metadata.pop("trace_ids", []),
+                "metadata": metadata,
+            })
         return result
 
     async def get_run_async(self, run_id: str) -> dict[str, Any] | None:
@@ -118,6 +133,15 @@ class EvaluationRepository:
     async def trends_async(self, limit: int = 30) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self.trends, limit)
 
+    def failures(self, run_id: str) -> list[dict[str, Any]] | None:
+        run = self.get_run(run_id)
+        if run is None:
+            return None
+        return [item for item in run["results"] if not item["passed"]]
+
+    async def failures_async(self, run_id: str) -> list[dict[str, Any]] | None:
+        return await asyncio.to_thread(self.failures, run_id)
+
     @staticmethod
     def _json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -131,3 +155,6 @@ class EvaluationRepository:
             "pass_rate": row["pass_rate"], "metrics": json.loads(row["metrics"]),
             "metadata": json.loads(row["metadata"]),
         }
+
+
+SQLiteEvaluationRepository = EvaluationRepository

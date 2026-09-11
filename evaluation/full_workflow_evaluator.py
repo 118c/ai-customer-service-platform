@@ -3,60 +3,38 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from evaluation.rag_metrics import grounded_fact_score, retrieval_metrics
-
-
-@dataclass
-class WorkflowEvaluationCase:
-    case_id: str
-    message: str
-    expected_intent: Optional[str] = None
-    expected_action_type: Optional[str] = None
-    expected_final_status: str = "completed"
-    decision: Optional[str] = None
-    relevant_documents: list[str] = field(default_factory=list)
-    expected_facts: list[str] = field(default_factory=list)
-    expect_receipt: bool = False
-    verify_idempotency: bool = False
-    expected_degradation_components: list[str] = field(default_factory=list)
-    user_id: str = "E1001"
-
-
-@dataclass
-class WorkflowCaseResult:
-    case_id: str
-    passed: bool
-    latency_ms: float
-    checks: dict[str, bool]
-    metrics: dict[str, float]
-    detail: str = ""
-
-
-@dataclass
-class WorkflowEvaluationRun:
-    run_id: str
-    suite: str
-    dataset_version: str
-    started_at: str
-    completed_at: str
-    status: str
-    pass_rate: float
-    metrics: dict[str, float]
-    metadata: dict[str, Any]
-    results: list[WorkflowCaseResult]
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+from evaluation.schemas import WorkflowCaseResult, WorkflowEvaluationCase, WorkflowEvaluationRun
 
 
 class FullWorkflowEvaluator:
-    def __init__(self, workflow: Any, dataset_version: str = "1"):
+    COUNT_METRICS = {"cancelled_write_count", "duplicate_write_count", "idempotency_hit_count"}
+    PUBLIC_FIELDS = {
+        "request_id", "conversation_id", "answer", "status", "sources", "confirmation", "receipt"
+    }
+    INTERNAL_FIELDS = {
+        "intent", "intent_confidence", "intent_source_scores", "agent_type", "agent_types",
+        "primary_agent", "supporting_agents", "routing_reason", "routing_confidence",
+        "model_provider", "degradation_events", "pending_action", "review_decision",
+    }
+
+    def __init__(
+        self,
+        workflow: Any,
+        dataset_version: str = "1",
+        *,
+        trace_store: Any = None,
+        public_response_builder: Optional[Callable[[dict[str, Any], str], Any]] = None,
+        model_provider: str | Callable[[], str] = "",
+    ):
         self.workflow = workflow
         self.dataset_version = dataset_version
+        self.trace_store = trace_store
+        self.public_response_builder = public_response_builder
+        self.model_provider = model_provider
 
     async def run(self, cases: list[WorkflowEvaluationCase]) -> WorkflowEvaluationRun:
         started = self._now()
@@ -70,7 +48,9 @@ class FullWorkflowEvaluator:
             for name, value in result.metrics.items():
                 metric_values.setdefault(name, []).append(value)
         metrics = {
-            name: round(sum(values) / len(values), 4)
+            name: round(
+                sum(values) if name in self.COUNT_METRICS else sum(values) / len(values), 4
+            )
             for name, values in metric_values.items() if values
         }
         passed = sum(1 for result in results if result.passed)
@@ -81,6 +61,12 @@ class FullWorkflowEvaluator:
         metrics["workflow_success_rate"] = round(passed / len(results), 4) if results else 1.0
         metrics["failure_rate"] = round(1.0 - metrics["workflow_success_rate"], 4)
         self._add_check_rate(metrics, results, "business_success", "business_success_rate")
+        self._add_check_rate(
+            metrics, results, "confirmation_success", "confirmation_success_rate"
+        )
+        self._add_check_rate(
+            metrics, results, "workflow_resume_success", "workflow_resume_success_rate"
+        )
         review_checks = [
             value
             for result in results
@@ -108,26 +94,48 @@ class FullWorkflowEvaluator:
         self, case: WorkflowEvaluationCase, run_id: str, index: int
     ) -> WorkflowCaseResult:
         started = time.monotonic()
-        request_id = f"eval-{run_id[:10]}-{index}"
         conversation_id = f"eval-conv-{run_id[:10]}-{index}"
         checks: dict[str, bool] = {}
         metrics: dict[str, float] = {}
+        request_ids: list[str] = []
+        trace_ids: list[str] = []
         try:
+            turns = case.input_turns()
+            if not turns:
+                raise ValueError("evaluation case has no input turns")
             execute_before = self._execute_count()
-            initial = await self.workflow.invoke({
-                "request_id": request_id,
-                "user_id": case.user_id,
-                "conversation_id": conversation_id,
-                "message": case.message,
-                "started_at": time.time(),
-            })
+            writes_before = self._gateway_counter("successful_writes")
+            duplicate_before = self._gateway_counter("duplicate_write_count")
+            idempotency_before = self._gateway_counter("idempotency_hit_count")
+            latency_count_before = len(getattr(
+                self.workflow.business_gateway, "execute_latencies_ms", []
+            ))
+            initial: dict[str, Any] = {}
+            for turn_index, message in enumerate(turns):
+                request_id = f"eval-{run_id[:10]}-{index}-{turn_index}"
+                request_ids.append(request_id)
+                initial = await self.workflow.invoke({
+                    "request_id": request_id,
+                    "user_id": case.user_id,
+                    "conversation_id": conversation_id,
+                    "message": message,
+                    "started_at": time.time(),
+                    "knowledge_top_k": max(1, min(case.top_k, 20)),
+                })
+                if turn_index < len(turns) - 1 and initial.get("status") == "awaiting_review":
+                    raise ValueError("only the final turn may require confirmation")
+                if await self._save_and_verify_trace(initial):
+                    trace_ids.append(request_id)
             execute_after_initial = self._execute_count()
 
             if case.expected_intent:
                 checks["intent"] = initial.get("intent") == case.expected_intent
+            if case.expected_primary_agent:
+                checks["primary_agent"] = initial.get("primary_agent") == case.expected_primary_agent
             pending = initial.get("pending_action") or {}
-            if case.expected_action_type:
-                checks["action_type"] = pending.get("action_type") == case.expected_action_type
+            expected_action = case.action_name()
+            if expected_action:
+                checks["action_type"] = pending.get("action_type") == expected_action
                 if pending.get("requires_review"):
                     no_result = not initial.get("action_result")
                     no_call = (
@@ -136,33 +144,74 @@ class FullWorkflowEvaluator:
                     )
                     checks["confirmation_before_write"] = no_result and no_call
 
-            ranked, evidence = self._ranked_sources(initial, case.relevant_documents)
-            if case.relevant_documents:
-                metrics.update(retrieval_metrics(ranked, case.relevant_documents, k=3))
-            if case.expected_facts:
+            source_targets = case.source_targets()
+            ranked, evidence = self._ranked_sources(initial, source_targets)
+            if source_targets:
+                metrics.update(retrieval_metrics(ranked, source_targets, k=case.top_k))
+                checks["expected_sources"] = set(source_targets).issubset(set(ranked[:case.top_k]))
+            fact_targets = case.fact_targets()
+            if fact_targets:
                 metrics["answer_faithfulness"] = round(
-                    grounded_fact_score(initial.get("response", ""), evidence, case.expected_facts), 4
+                    grounded_fact_score(initial.get("response", ""), evidence, fact_targets), 4
+                )
+                checks["answer_faithfulness"] = metrics["answer_faithfulness"] == 1.0
+            if case.forbidden_facts:
+                answer = initial.get("response", "")
+                checks["forbidden_facts_absent"] = not any(
+                    item in answer for item in case.forbidden_facts
+                )
+            if case.validate_public_contract:
+                checks["public_contract"] = bool(
+                    self.public_response_builder
+                    and self._valid_public_contract(initial, conversation_id)
                 )
 
             final = initial
-            if case.decision:
-                decision = self._decision(case.decision)
+            confirmation = case.confirmation_name()
+            request_id = request_ids[-1]
+            if confirmation:
+                decision = self._decision(confirmation, case.confirmation_changes)
                 final = await self.workflow.resume(request_id, decision)
+                if await self._save_and_verify_trace(final) and request_id not in trace_ids:
+                    trace_ids.append(request_id)
                 if decision["decision"] == "reject":
                     checks["cancel_prevents_write"] = not final.get("action_result")
-
-            checks["final_status"] = final.get("status") == case.expected_final_status
-            if case.expect_receipt:
-                checks["business_success"] = bool(
-                    isinstance(final.get("action_result"), dict)
-                    and final["action_result"].get("success")
-                    and final["action_result"].get("record_id")
+                checks["workflow_resume_success"] = final.get("status") == "completed"
+                checks["confirmation_success"] = (
+                    final.get("status") == "completed"
+                    and (
+                        not final.get("action_result")
+                        if decision["decision"] == "reject"
+                        else bool(final.get("review_decision"))
+                    )
                 )
 
-            if case.verify_idempotency and case.decision in {"confirm", "approve"}:
+            checks["final_status"] = final.get("status") == case.status_name()
+            has_receipt = bool(
+                isinstance(final.get("action_result"), dict)
+                and final["action_result"].get("success")
+                and final["action_result"].get("record_id")
+            )
+            if case.expected_receipt is not None:
+                checks["receipt_expectation"] = has_receipt is case.expected_receipt
+                if case.expected_receipt:
+                    checks["business_success"] = has_receipt
+            elif case.expect_receipt:
+                checks["business_success"] = has_receipt
+            if expected_action and confirmation not in {"cancel", "reject"}:
+                metrics["business_action_success_rate"] = 1.0 if has_receipt else 0.0
+                expected_business_failure = (
+                    "business.execute" in case.expected_degradation_components
+                )
+                if not expected_business_failure:
+                    checks["business_action_success"] = has_receipt
+
+            if case.verify_idempotency and confirmation in {"confirm", "approve", "edit"}:
                 first_record = (final.get("action_result") or {}).get("record_id")
                 execute_before_repeat = self._execute_count()
-                repeated = await self.workflow.resume(request_id, self._decision(case.decision))
+                repeated = await self.workflow.resume(
+                    request_id, self._decision(confirmation, case.confirmation_changes)
+                )
                 execute_after_repeat = self._execute_count()
                 second_record = (repeated.get("action_result") or {}).get("record_id")
                 checks["idempotent_confirmation"] = (
@@ -170,6 +219,39 @@ class FullWorkflowEvaluator:
                     and (
                         execute_before_repeat is None or execute_after_repeat is None
                         or execute_before_repeat == execute_after_repeat
+                    )
+                )
+
+            writes_after = self._gateway_counter("successful_writes")
+            duplicate_after = self._gateway_counter("duplicate_write_count")
+            idempotency_after = self._gateway_counter("idempotency_hit_count")
+            if confirmation in {"cancel", "reject"} and writes_before is not None and writes_after is not None:
+                metrics["cancelled_write_count"] = float(max(0, writes_after - writes_before))
+            if duplicate_before is not None and duplicate_after is not None:
+                metrics["duplicate_write_count"] = float(max(0, duplicate_after - duplicate_before))
+            if idempotency_before is not None and idempotency_after is not None:
+                metrics["idempotency_hit_count"] = float(max(0, idempotency_after - idempotency_before))
+            latencies = getattr(self.workflow.business_gateway, "execute_latencies_ms", [])
+            if len(latencies) > latency_count_before:
+                metrics["business_action_latency_ms"] = round(
+                    float(latencies[-1]), 2
+                )
+
+            if case.expect_memory_persisted and final.get("status") == "completed":
+                checks["memory_persisted"] = await self._memory_contains(
+                    case.user_id, conversation_id, turns, final.get("response", "")
+                )
+            if case.expect_trace:
+                checks["trace_linked"] = bool(
+                    self.trace_store is not None
+                    and set(request_ids).issubset(set(trace_ids))
+                )
+            if case.validate_public_contract:
+                checks["public_contract"] = (
+                    checks.get("public_contract", True)
+                    and bool(
+                        self.public_response_builder
+                        and self._valid_public_contract(final, conversation_id)
                     )
                 )
 
@@ -198,10 +280,17 @@ class FullWorkflowEvaluator:
             checks=checks,
             metrics=metrics,
             detail=detail,
+            request_ids=request_ids,
+            trace_ids=trace_ids,
+            metadata={"turn_count": len(request_ids), "conversation_id": conversation_id},
         )
 
     def _execute_count(self) -> Optional[int]:
         value = getattr(self.workflow.business_gateway, "execute_calls", None)
+        return int(value) if isinstance(value, int) else None
+
+    def _gateway_counter(self, name: str) -> Optional[int]:
+        value = getattr(self.workflow.business_gateway, name, None)
         return int(value) if isinstance(value, int) else None
 
     @staticmethod
@@ -224,12 +313,64 @@ class FullWorkflowEvaluator:
             metrics[metric_name] = round(sum(1 for value in values if value) / len(values), 4)
 
     @staticmethod
-    def _decision(value: str) -> dict[str, str]:
+    def _decision(value: str, changes: Optional[dict[str, Any]] = None) -> dict[str, Any]:
         normalized = value.lower()
-        return {
-            "decision": "approve" if normalized in {"confirm", "approve"} else "reject",
+        decision: dict[str, Any] = {
+            "decision": (
+                "edit" if normalized == "edit"
+                else "approve" if normalized in {"confirm", "approve"}
+                else "reject"
+            ),
             "reason": "evaluation_case",
         }
+        if decision["decision"] == "edit":
+            decision["payload"] = changes or {}
+        return decision
+
+    async def _save_and_verify_trace(self, result: dict[str, Any]) -> bool:
+        if self.trace_store is None or not result.get("request_id"):
+            return False
+        from monitor.trace_store import build_trace
+
+        provider = self.model_provider() if callable(self.model_provider) else self.model_provider
+        await self.trace_store.save(result["request_id"], build_trace(result, provider))
+        trace = await self.trace_store.get(result["request_id"])
+        return bool(trace and trace.get("request_id") == result["request_id"])
+
+    async def _memory_contains(
+        self, user_id: str, conversation_id: str, turns: list[str], response: str
+    ) -> bool:
+        memory = self.workflow.memory
+        raw_messages = getattr(memory, "messages", None)
+        if isinstance(raw_messages, list):
+            contents = [str(item[-1]) for item in raw_messages if isinstance(item, (tuple, list)) and item]
+            return all(turn in contents for turn in turns) and response in contents
+        try:
+            context = await memory.get_context(user_id, conversation_id, query=turns[-1])
+            items = getattr(context, "recent_messages", [])
+            contents = [str(getattr(item, "content", "")) for item in items]
+            return turns[-1] in contents and response in contents
+        except Exception:
+            return False
+
+    def _valid_public_contract(self, result: dict[str, Any], conversation_id: str) -> bool:
+        try:
+            public = self.public_response_builder(result, conversation_id)
+            data = public.model_dump() if hasattr(public, "model_dump") else dict(public)
+        except Exception:
+            return False
+        if set(data) != self.PUBLIC_FIELDS:
+            return False
+        return not self._contains_internal_key(data)
+
+    def _contains_internal_key(self, value: Any) -> bool:
+        if isinstance(value, dict):
+            if self.INTERNAL_FIELDS.intersection(value):
+                return True
+            return any(self._contains_internal_key(item) for item in value.values())
+        if isinstance(value, list):
+            return any(self._contains_internal_key(item) for item in value)
+        return False
 
     @staticmethod
     def _ranked_sources(

@@ -1,0 +1,3 @@
+{"case_id":"rag-attendance-001","question":"跨日夜班归属哪一天考勤？","relevant_document_ids":["policy-attendance-v1"],"standard_facts":["班次开始日期"],"forbidden_facts":["班次结束日期"],"expected_citations":["policy-attendance-v1"],"top_k":3}
+{"case_id":"rag-equipment-001","question":"P1停线故障应该先做什么？","relevant_document_ids":["equipment-repair-v1"],"standard_facts":["确保人员安全"],"forbidden_facts":["直接复位安全联锁"],"expected_citations":["equipment-repair-v1"],"top_k":3}
+{"case_id":"rag-process-version-001","question":"工艺资料版本冲突时如何处理？","relevant_document_ids":["process-governance-v1"],"standard_facts":["工艺工程师确认"],"forbidden_facts":["自行选择任意版本"],"expected_citations":["process-governance-v1"],"top_k":3}

@@ -1,4 +1,8 @@
-{"case_id":"policy-rag-attendance","message":"跨日夜班的考勤日期怎么计算？","expected_intent":"attendance_query","relevant_documents":["三班制考勤与交接规范"],"expected_facts":["班次开始日期"]}
-{"case_id":"workflow-status-query","message":"申请单WF-202609-001现在到哪个节点？","expected_intent":"workflow_query"}
-{"case_id":"approval-cancel","message":"帮我提交一份领料申请","expected_intent":"approval_request","expected_action_type":"workflow.submit","decision":"cancel"}
-{"case_id":"repair-confirm-idempotency","message":"帮我给设备EQ-A17创建报修单，主轴有异响","expected_intent":"repair_request","expected_action_type":"repair.create","decision":"confirm","expect_receipt":true,"verify_idempotency":true}
+{"case_id":"greeting-general-001","turns":["你好"],"expected_intent":"greeting","expected_primary_agent":"general","expected_status":"completed"}
+{"case_id":"process-rag-001","turns":["现场应该使用哪个版本的工艺规范？"],"expected_intent":"process_spec","expected_primary_agent":"general","expected_status":"completed","expected_sources":["工艺文件使用规范"],"top_k":3}
+{"case_id":"policy-rag-attendance-001","turns":["跨日夜班的考勤日期怎么计算？"],"expected_intent":"attendance_query","expected_primary_agent":"policy","expected_status":"completed","expected_sources":["三班制考勤与交接规范"],"standard_facts":["班次开始日期"],"forbidden_facts":["班次结束日期"],"top_k":3}
+{"case_id":"workflow-status-query-001","turns":["申请单WF-202609-001现在到哪个节点？"],"expected_intent":"workflow_query","expected_primary_agent":"workflow","expected_status":"completed"}
+{"case_id":"approval-cancel-001","turns":["帮我提交一份领料申请"],"expected_intent":"approval_request","expected_primary_agent":"workflow","expected_action":"workflow.submit","confirmation":"cancel","expected_status":"completed","expected_receipt":false}
+{"case_id":"repair-confirm-001","turns":["帮我给设备EQ-A17创建报修单，主轴有异响"],"expected_intent":"repair_request","expected_primary_agent":"technical","expected_action":"repair.create","confirmation":"confirm","expected_status":"completed","expected_receipt":true,"verify_idempotency":true}
+{"case_id":"material-multiturn-edit-001","turns":["我想咨询领料流程","帮我提交领料申请，物料编码 MAT-1008，数量 20"],"expected_intent":"approval_request","expected_primary_agent":"workflow","expected_action":"workflow.submit","confirmation":"edit","confirmation_changes":{"material_code":"MAT-1008","quantity":20},"expected_status":"completed","expected_receipt":true,"verify_idempotency":true}
+{"case_id":"human-handoff-001","turns":["这个问题需要人工协助"],"expected_intent":"human_handoff","expected_primary_agent":"escalation","expected_action":"handoff.create","expected_status":"completed","expected_receipt":true}

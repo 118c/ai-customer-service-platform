@@ -36,6 +36,7 @@ class WorkflowState(TypedDict, total=False):
     sources: List[Dict[str, Any]]
     business_context: Dict[str, Any]
     degradation_events: List[Dict[str, str]]
+    knowledge_top_k: int
     response: str
     agent_type: str
     agent_types: List[str]
@@ -141,12 +142,13 @@ class EmployeeServiceWorkflow:
         degradation_events = list(state.get("degradation_events", []))
         if self._needs_knowledge(state.get("intent", "")):
             try:
+                top_k = max(1, min(int(state.get("knowledge_top_k", 3)), 20))
                 search = await self.tool_manager.search_with_rewrite(
-                    "knowledge_search", state["message"], top_k=3
+                    "knowledge_search", state["message"], top_k=top_k
                 )
                 if search.success and isinstance(search.data, list) and search.data:
                     citations = []
-                    for item in search.data[:3]:
+                    for item in search.data[:top_k]:
                         if isinstance(item, dict) and item.get("content") and not item.get("fallback"):
                             title = str(item.get("title", "企业知识"))
                             excerpt = self._public_excerpt(str(item["content"]))
@@ -266,7 +268,7 @@ class EmployeeServiceWorkflow:
         raw = dict(state["pending_action"])
         decision = state.get("review_decision", {})
         if decision.get("decision") == "edit" and isinstance(decision.get("payload"), dict):
-            raw["payload"] = decision["payload"]
+            raw["payload"] = {**raw.get("payload", {}), **decision["payload"]}
         action = BusinessAction(
             action_type=raw["action_type"],
             payload=raw["payload"],

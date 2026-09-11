@@ -53,8 +53,8 @@ _llm_gateway = None
 _checkpointer_context = None
 _business_gateway = None
 _trace_store = None
-_workflow_evaluator = None
 _evaluation_repository = None
+_evaluation_service = None
 
 def _anthropic_cfg() -> Dict[str, Any]:
     key = os.getenv("ANTHROPIC_API_KEY", "offline-continuity")
@@ -72,14 +72,14 @@ def _anthropic_cfg() -> Dict[str, Any]:
 async def lifespan(app: FastAPI):
     global _orchestrator, _memory, _tool_manager, _monitor, _evaluator, _skill_manager
     global _workflow, _llm_gateway, _checkpointer_context, _business_gateway, _trace_store
-    global _workflow_evaluator, _evaluation_repository
+    global _evaluation_repository, _evaluation_service
 
     print(BANNER, flush=True)
 
     from agents.agent_orchestrator import AgentOrchestrator, Request
     from core.intent_recognizer import IntentRecognizer
     from evaluation.evaluator import EndToEndEvaluator
-    from evaluation.full_workflow_evaluator import FullWorkflowEvaluator
+    from evaluation.evaluation_service import EvaluationService
     from evaluation.repository import EvaluationRepository
     from mcp.knowledge_base import KnowledgeBase
     from mcp.tool_manager import MCPToolManager, Tool
@@ -207,12 +207,17 @@ async def lifespan(app: FastAPI):
         checkpointer=checkpointer,
     )
     app.state.checkpoint_backend = checkpoint_backend
-    _workflow_evaluator = FullWorkflowEvaluator(
-        _workflow,
-        dataset_version=os.getenv("WORKFLOW_EVAL_DATASET_VERSION", "2026.09"),
-    )
     _evaluation_repository = EvaluationRepository(
         os.getenv("EVALUATION_DB_PATH", "./data/evaluations.db")
+    )
+    _evaluation_service = EvaluationService(
+        workflow=_workflow,
+        repository=_evaluation_repository,
+        project_root=_ROOT,
+        trace_store=_trace_store,
+        public_response_builder=_employee_response,
+        model_provider=lambda: _llm_gateway.last_provider if _llm_gateway else "",
+        llm_judge=_llm_gateway,
     )
 
     # 性能监控（可选启动 Prometheus）
@@ -652,15 +657,29 @@ class EvalRunInput(BaseModel):
 
 class WorkflowEvalCaseInput(BaseModel):
     case_id: str = Field(min_length=1, max_length=128)
-    message: str = Field(min_length=1, max_length=4000)
+    message: str = Field(default="", max_length=4000)
+    turns: List[str] = Field(default_factory=list)
     expected_intent: Optional[str] = None
+    expected_primary_agent: Optional[str] = None
+    expected_action: Optional[str] = None
     expected_action_type: Optional[str] = None
+    expected_status: str = ""
     expected_final_status: str = "completed"
-    decision: Optional[str] = Field(default=None, pattern="^(confirm|cancel|approve|reject)$")
+    confirmation: Optional[str] = Field(default=None, pattern="^(confirm|cancel|approve|reject|edit)$")
+    decision: Optional[str] = Field(default=None, pattern="^(confirm|cancel|approve|reject|edit)$")
+    confirmation_changes: Dict[str, Any] = Field(default_factory=dict)
+    expected_sources: List[str] = Field(default_factory=list)
     relevant_documents: List[str] = Field(default_factory=list)
+    standard_facts: List[str] = Field(default_factory=list)
     expected_facts: List[str] = Field(default_factory=list)
+    forbidden_facts: List[str] = Field(default_factory=list)
+    top_k: int = Field(default=3, ge=1, le=20)
+    expected_receipt: Optional[bool] = None
     expect_receipt: bool = False
     verify_idempotency: bool = False
+    expect_memory_persisted: bool = True
+    expect_trace: bool = True
+    validate_public_contract: bool = True
     expected_degradation_components: List[str] = Field(default_factory=list)
     user_id: str = "E1001"
 
@@ -668,6 +687,22 @@ class WorkflowEvalCaseInput(BaseModel):
 class WorkflowEvalRunInput(BaseModel):
     dataset_version: str = Field(default="2026.09", min_length=1, max_length=64)
     cases: Optional[List[WorkflowEvalCaseInput]] = None
+
+
+class RAGEvalCaseInput(BaseModel):
+    case_id: str = Field(min_length=1, max_length=128)
+    question: str = Field(min_length=1, max_length=4000)
+    relevant_document_ids: List[str]
+    standard_facts: List[str]
+    forbidden_facts: List[str] = Field(default_factory=list)
+    expected_citations: List[str] = Field(default_factory=list)
+    top_k: int = Field(default=3, ge=1, le=20)
+    user_id: str = "E1001"
+
+
+class RAGEvalRunInput(BaseModel):
+    dataset_version: str = Field(default="2026.09", min_length=1, max_length=64)
+    cases: Optional[List[RAGEvalCaseInput]] = None
 
 
 @app.post("/knowledge/add", tags=["知识库"])
@@ -820,7 +855,7 @@ async def run_eval(request: FastAPIRequest, body: Optional[EvalRunInput] = None)
 
 def _default_workflow_eval_cases():
     import json
-    from evaluation.full_workflow_evaluator import WorkflowEvaluationCase
+    from evaluation.schemas import WorkflowEvaluationCase
     dataset_path = pathlib.Path(_ROOT) / "evaluation" / "datasets" / "workflow_cases.jsonl"
     if dataset_path.exists():
         return [
@@ -866,18 +901,40 @@ async def run_workflow_evaluation(
 ):
     """Run the versioned LangGraph/RAG/business/HITL regression suite."""
     _require_admin(request)
-    if _workflow is None or _evaluation_repository is None:
+    if _evaluation_service is None:
         raise HTTPException(503, "评测服务未就绪")
-    from evaluation.full_workflow_evaluator import FullWorkflowEvaluator, WorkflowEvaluationCase
+    from evaluation.schemas import WorkflowEvaluationCase
 
     dataset_version = body.dataset_version if body else "2026.09"
     if body and body.cases is not None:
         cases = [WorkflowEvaluationCase(**case.model_dump()) for case in body.cases]
     else:
         cases = _default_workflow_eval_cases()
-    evaluator = FullWorkflowEvaluator(_workflow, dataset_version=dataset_version)
-    report = await evaluator.run(cases)
-    await _evaluation_repository.save_run_async(report)
+    report = await _evaluation_service.run(cases, dataset_version=dataset_version)
+    return report.to_dict()
+
+
+@app.post("/admin/evaluations/rag/run", tags=["Operations"])
+async def run_rag_evaluation(
+    request: FastAPIRequest, body: Optional[RAGEvalRunInput] = None
+):
+    """Run deterministic RAG checks plus the configured model judge."""
+    _require_admin(request)
+    if _evaluation_service is None:
+        raise HTTPException(503, "评测服务未就绪")
+    import json
+    from evaluation.schemas import RAGEvaluationCase
+
+    dataset_version = body.dataset_version if body else "2026.09"
+    if body and body.cases is not None:
+        cases = [RAGEvaluationCase(**case.model_dump()) for case in body.cases]
+    else:
+        path = pathlib.Path(_ROOT) / "evaluation" / "datasets" / "rag_cases.jsonl"
+        cases = [
+            RAGEvaluationCase(**json.loads(line))
+            for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+        ]
+    report = await _evaluation_service.run_rag(cases, dataset_version)
     return report.to_dict()
 
 
@@ -906,6 +963,17 @@ async def get_workflow_evaluation(run_id: str, request: FastAPIRequest):
     if report is None:
         raise HTTPException(404, "未找到评测记录")
     return report
+
+
+@app.get("/admin/evaluations/{run_id}/failures", tags=["Operations"])
+async def get_workflow_evaluation_failures(run_id: str, request: FastAPIRequest):
+    _require_admin(request)
+    if _evaluation_repository is None:
+        raise HTTPException(503, "评测存储未就绪")
+    failures = await _evaluation_repository.failures_async(run_id)
+    if failures is None:
+        raise HTTPException(404, "未找到评测记录")
+    return {"items": failures}
 
 
 # ── 交互式 CLI ────────────────────────────────────────────────────────────────
