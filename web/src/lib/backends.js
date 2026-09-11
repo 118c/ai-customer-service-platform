@@ -34,6 +34,25 @@ export function requestHealth() {
   return requestJson('/health')
 }
 
+export async function requestOperations(path, adminKey = '', options = {}) {
+  const headers = new Headers(options.headers || {})
+  headers.set('Content-Type', 'application/json')
+  if (adminKey) headers.set('X-Admin-Key', adminKey)
+  const response = await fetch(`${BASE_URL}${path}`, { ...options, headers })
+  const text = await response.text()
+  let data
+  try {
+    data = text ? JSON.parse(text) : null
+  } catch {
+    data = text
+  }
+  if (!response.ok) {
+    const detail = typeof data === 'string' ? data : data?.detail || '请求未完成'
+    throw new Error(detail)
+  }
+  return data
+}
+
 async function requestJson(path, options = {}) {
   const headers = new Headers(options.headers || {})
   headers.set('Content-Type', 'application/json')

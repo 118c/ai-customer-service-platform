@@ -21,3 +21,16 @@ async def test_reviewed_repair_action_creates_order(tmp_path):
     result = await gateway.execute(action)
     assert result["success"] is True
     assert result["record_id"].startswith("REP-")
+
+
+async def test_business_action_reuses_result_for_same_idempotency_key(tmp_path):
+    gateway = LocalReferenceGateway(str(tmp_path / "services.db"))
+    action = plan_business_action(
+        "repair_request", "设备 EQ-A17 主轴异响", "E1001", "conv-1",
+        {"equipment_id": ["EQ-A17"]}, request_id="request-stable-1",
+    )
+    assert action is not None
+    first = await gateway.execute(action)
+    second = await gateway.execute(action)
+    assert second["record_id"] == first["record_id"]
+    assert second["idempotent_replay"] is True

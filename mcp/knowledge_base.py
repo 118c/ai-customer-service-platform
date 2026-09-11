@@ -83,17 +83,29 @@ class KnowledgeBase:
         for doc in documents:
             title   = doc.get("title", "")
             content = doc.get("content", "")
+            document_id = doc.get("document_id") or hashlib.sha256(
+                f"{title}:{content}".encode("utf-8")
+            ).hexdigest()[:20]
+            version = doc.get("version", "1")
+            effective_date = doc.get("effective_date", "")
             chunks  = self._chunk_text(content, chunk_size=500)
 
             for i, chunk in enumerate(chunks):
-                doc_id = hashlib.md5(f"{title}_{i}_{chunk[:50]}".encode()).hexdigest()
-                ids.append(doc_id)
+                chunk_id = hashlib.md5(f"{document_id}_{i}_{chunk[:50]}".encode()).hexdigest()
+                ids.append(chunk_id)
                 docs.append(chunk)
-                metas.append({"title": title, "chunk_index": i, "total_chunks": len(chunks)})
+                metas.append({
+                    "document_id": document_id,
+                    "title": title,
+                    "version": version,
+                    "effective_date": effective_date,
+                    "chunk_index": i,
+                    "total_chunks": len(chunks),
+                })
 
         if ids:
             # ChromaDB 会自动生成 Embedding
-            self._collection.add(ids=ids, documents=docs, metadatas=metas)
+            self._collection.upsert(ids=ids, documents=docs, metadatas=metas)
             logger.info(f"知识库导入 {len(ids)} 个文档片段")
 
         return len(ids)
@@ -121,10 +133,13 @@ class KnowledgeBase:
                 results["distances"][0],
             ):
                 items.append({
+                    "document_id": meta.get("document_id", ""),
                     "title":    meta.get("title", ""),
                     "content":  doc,
                     "score":    round(1.0 - dist, 4),  # ChromaDB 返回距离，转为相似度
                     "chunk":    meta.get("chunk_index", 0),
+                    "version":  meta.get("version", ""),
+                    "effective_date": meta.get("effective_date", ""),
                 })
 
         return items

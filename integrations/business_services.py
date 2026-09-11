@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import pathlib
@@ -20,6 +21,7 @@ class BusinessAction:
     payload: Dict[str, Any]
     requires_review: bool
     description: str
+    idempotency_key: str = ""
 
 
 class BusinessServiceGateway(Protocol):
@@ -65,6 +67,10 @@ class LocalReferenceGateway:
                     id TEXT PRIMARY KEY, action_type TEXT NOT NULL, payload TEXT NOT NULL,
                     result TEXT NOT NULL, created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS idempotency_records (
+                    idempotency_key TEXT PRIMARY KEY, action_type TEXT NOT NULL,
+                    result TEXT NOT NULL, created_at TEXT NOT NULL
+                );
                 """
             )
             db.execute(
@@ -101,41 +107,56 @@ class LocalReferenceGateway:
 
     def _execute_sync(self, action: BusinessAction) -> Dict[str, Any]:
         now = self._now()
-        if action.action_type == "repair.create":
-            record_id = f"REP-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
-            with self._connect() as db:
+        idempotency_key = action.idempotency_key or self._derive_idempotency_key(action)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute(
+                "SELECT result FROM idempotency_records WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if existing:
+                result = json.loads(existing["result"])
+                result["idempotent_replay"] = True
+                return result
+
+            if action.action_type == "repair.create":
+                record_id = f"REP-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
                 db.execute(
                     "INSERT INTO repair_orders VALUES (?, ?, ?, ?, ?, ?)",
                     (record_id, action.payload.get("equipment_id", "UNASSIGNED"), action.payload.get("area", ""),
                      action.payload.get("symptom", "待补充"), "submitted", now),
                 )
-            result = {"success": True, "record_id": record_id, "status": "submitted"}
-            self._audit(action, result)
-            return result
-        if action.action_type == "workflow.submit":
-            record_id = f"WF-{datetime.now().strftime('%Y%m')}-{uuid.uuid4().hex[:6].upper()}"
-            with self._connect() as db:
+                result = {"success": True, "record_id": record_id, "status": "submitted"}
+            elif action.action_type == "workflow.submit":
+                record_id = f"WF-{datetime.now().strftime('%Y%m')}-{uuid.uuid4().hex[:6].upper()}"
                 db.execute(
                     "INSERT INTO workflows VALUES (?, ?, ?, ?, ?, ?)",
                     (record_id, action.payload.get("title", "员工服务申请"), "直属主管",
                      action.payload.get("user_id", "unknown"), "processing", now),
                 )
-            result = {"success": True, "record_id": record_id, "status": "processing"}
-            self._audit(action, result)
-            return result
-        if action.action_type == "handoff.create":
-            record_id = f"HITL-{uuid.uuid4().hex[:10].upper()}"
-            with self._connect() as db:
+                result = {"success": True, "record_id": record_id, "status": "processing"}
+            elif action.action_type == "handoff.create":
+                record_id = f"HITL-{uuid.uuid4().hex[:10].upper()}"
                 db.execute(
                     "INSERT INTO handoff_tasks VALUES (?, ?, ?, ?, ?, ?)",
                     (record_id, action.payload.get("user_id", "unknown"),
                      action.payload.get("conversation_id", "unknown"),
                      action.payload.get("reason", "人工协助"), "pending", now),
                 )
-            result = {"success": True, "record_id": record_id, "status": "pending"}
-            self._audit(action, result)
+                result = {"success": True, "record_id": record_id, "status": "pending"}
+            else:
+                result = {"success": False, "reason": "unsupported_action", "action": asdict(action)}
+
+            db.execute(
+                "INSERT INTO audit_events VALUES (?, ?, ?, ?, ?)",
+                (uuid.uuid4().hex, action.action_type, json.dumps(action.payload, ensure_ascii=False),
+                 json.dumps(result, ensure_ascii=False), now),
+            )
+            db.execute(
+                "INSERT INTO idempotency_records VALUES (?, ?, ?, ?)",
+                (idempotency_key, action.action_type, json.dumps(result, ensure_ascii=False), now),
+            )
             return result
-        return {"success": False, "reason": "unsupported_action", "action": asdict(action)}
 
     async def list_tasks(self, limit: int = 20) -> list[Dict[str, Any]]:
         return await asyncio.to_thread(self._list_tasks_sync, max(1, min(limit, 100)))
@@ -164,6 +185,16 @@ class LocalReferenceGateway:
             )
 
     @staticmethod
+    def _derive_idempotency_key(action: BusinessAction) -> str:
+        canonical = json.dumps(
+            {"action_type": action.action_type, "payload": action.payload},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat()
 
@@ -180,14 +211,28 @@ class HttpEnterpriseGateway:
         return await self._request("POST", "/v1/queries", {"type": action_type, "payload": payload})
 
     async def execute(self, action: BusinessAction) -> Dict[str, Any]:
-        return await self._request("POST", "/v1/actions", {**asdict(action), "approved": True})
+        return await self._request(
+            "POST",
+            "/v1/actions",
+            {**asdict(action), "approved": True},
+            idempotency_key=action.idempotency_key or LocalReferenceGateway._derive_idempotency_key(action),
+        )
 
     async def list_tasks(self, limit: int = 20) -> list[Dict[str, Any]]:
         result = await self._request("POST", "/v1/tasks/query", {"limit": max(1, min(limit, 100))})
         return list(result.get("items", []))
 
-    async def _request(self, method: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        headers = {"Authorization": f"Bearer {self.api_token}", "Idempotency-Key": uuid.uuid4().hex}
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        payload: Dict[str, Any],
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        headers = {
+            "Authorization": f"Bearer {self.api_token}",
+            "Idempotency-Key": idempotency_key or uuid.uuid4().hex,
+        }
         async with httpx.AsyncClient(timeout=self.timeout_s) as client:
             response = await client.request(method, f"{self.base_url}{path}", headers=headers, json=payload)
             response.raise_for_status()
@@ -203,9 +248,13 @@ def create_business_gateway() -> BusinessServiceGateway:
 
 
 def plan_business_action(intent: str, message: str, user_id: str, conversation_id: str,
-                         entities: Optional[Dict[str, list[str]]] = None) -> Optional[BusinessAction]:
+                         entities: Optional[Dict[str, list[str]]] = None,
+                         request_id: str = "") -> Optional[BusinessAction]:
     entities = entities or {}
     first = lambda key, default="": (entities.get(key) or [default])[0]
+    key = request_id or hashlib.sha256(
+        f"{conversation_id}:{intent}:{message}".encode("utf-8")
+    ).hexdigest()
     if intent == "repair_request":
         return BusinessAction(
             "repair.create",
@@ -213,6 +262,7 @@ def plan_business_action(intent: str, message: str, user_id: str, conversation_i
              "user_id": user_id},
             True,
             "创建设备报修单",
+            key,
         )
     if intent == "approval_request":
         return BusinessAction(
@@ -220,6 +270,7 @@ def plan_business_action(intent: str, message: str, user_id: str, conversation_i
             {"title": message[:80], "user_id": user_id, "conversation_id": conversation_id},
             True,
             "提交企业流程申请",
+            key,
         )
     if intent in {"human_handoff", "escalation"}:
         return BusinessAction(
@@ -227,6 +278,7 @@ def plan_business_action(intent: str, message: str, user_id: str, conversation_i
             {"reason": message[:200], "user_id": user_id, "conversation_id": conversation_id},
             False,
             "创建人工协同任务",
+            key,
         )
     return None
 

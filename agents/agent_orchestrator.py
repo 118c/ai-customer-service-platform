@@ -18,6 +18,7 @@
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -49,6 +50,10 @@ class AgentStats:
     success:   int   = 0
     total_ms:  float = 0.0
     monitor_penalty: float = 0.0
+    health_state: str = "healthy"
+    unhealthy_cycles: int = 0
+    isolated_until: float = 0.0
+    recovery_seconds: float = 30.0
 
     @property
     def success_rate(self) -> float:
@@ -63,6 +68,15 @@ class AgentStats:
         latency_score = 1.0 / (1.0 + self.avg_ms / 1000)
         base_score = self.success_rate * 0.7 + latency_score * 0.3
         return base_score * max(0.0, 1.0 - self.monitor_penalty)
+
+    def refresh_health(self) -> None:
+        if self.health_state == "isolated" and time.monotonic() >= self.isolated_until:
+            self.health_state = "half_open"
+
+    @property
+    def available(self) -> bool:
+        self.refresh_health()
+        return self.health_state != "isolated"
 
 
 @dataclass
@@ -146,6 +160,10 @@ class BaseAgent:
             ms = (time.monotonic() - t0) * 1000
             self.stats.success += 1
             self.stats.total_ms += ms
+            if self.stats.health_state == "half_open":
+                self.stats.health_state = "healthy"
+                self.stats.unhealthy_cycles = 0
+                self.stats.monitor_penalty = 0.0
             escalate = self._needs_escalation(content)
             return AgentResponse(
                 agent_type=self.agent_type,
@@ -157,6 +175,9 @@ class BaseAgent:
         except Exception as ex:
             ms = (time.monotonic() - t0) * 1000
             self.stats.total_ms += ms
+            if self.stats.health_state == "half_open":
+                self.stats.health_state = "isolated"
+                self.stats.isolated_until = time.monotonic() + self.stats.recovery_seconds
             logger.error(f"{self.agent_type.value} 处理失败: {ex}")
             return AgentResponse(
                 agent_type=self.agent_type,
@@ -257,6 +278,10 @@ class AgentOrchestrator:
       3. 专属 Agent 失败时降级到 GeneralAgent
     """
 
+    ISOLATION_PENALTY_THRESHOLD = 0.5
+    ISOLATION_CONSECUTIVE_CYCLES = 2
+    ISOLATION_RECOVERY_SECONDS = 30.0
+
     # 意图 → Agent 类型的静态映射（路由表）
     _INTENT_ROUTING: Dict[IntentCategory, AgentType] = {
         IntentCategory.TECHNICAL:  AgentType.TECHNICAL,
@@ -290,6 +315,15 @@ class AgentOrchestrator:
             api_key=api_key, base_url=base_url, model=model, llm_gateway=llm_gateway
         )
         self._skill_manager = skill_manager
+        self._isolation_penalty_threshold = float(
+            os.getenv("AGENT_ISOLATION_PENALTY_THRESHOLD", str(self.ISOLATION_PENALTY_THRESHOLD))
+        )
+        self._isolation_consecutive_cycles = int(
+            os.getenv("AGENT_ISOLATION_CONSECUTIVE_CYCLES", str(self.ISOLATION_CONSECUTIVE_CYCLES))
+        )
+        self._isolation_recovery_seconds = float(
+            os.getenv("AGENT_ISOLATION_RECOVERY_SECONDS", str(self.ISOLATION_RECOVERY_SECONDS))
+        )
 
         # Agent 池：每种类型可有多个实例（水平扩展）
         self._pool: Dict[AgentType, List[BaseAgent]] = {
@@ -298,6 +332,9 @@ class AgentOrchestrator:
             AgentType.POLICY:    [PolicyAgent(client, model, skill_manager, llm_gateway)],
             AgentType.WORKFLOW:  [WorkflowAgent(client, model, skill_manager, llm_gateway)],
         }
+        for agents in self._pool.values():
+            for agent in agents:
+                agent.stats.recovery_seconds = self._isolation_recovery_seconds
 
     def set_skill_manager(self, skill_manager: Optional[Any]) -> None:
         """更新 SkillManager 引用，供运行时重载或测试替换使用。"""
@@ -429,7 +466,7 @@ class AgentOrchestrator:
         if intent and intent in self._INTENT_ROUTING:
             target = self._INTENT_ROUTING[intent]
             # 如果目标类型有可用实例则使用，否则降级
-            if target in self._pool and self._pool[target]:
+            if self._has_available_agent(target):
                 return target
 
         return AgentType.GENERAL
@@ -459,7 +496,7 @@ class AgentOrchestrator:
         available_scores = {
             agent_type: score
             for agent_type, score in scores.items()
-            if agent_type == AgentType.GENERAL or self._pool.get(agent_type)
+            if self._has_available_agent(agent_type)
         }
         if not available_scores:
             return RoutingDecision(
@@ -606,7 +643,7 @@ class AgentOrchestrator:
 
         # 保持顺序去重，并只返回当前有实例的 Agent 类型。
         deduped = list(dict.fromkeys(targets))
-        return [agent_type for agent_type in deduped if self._pool.get(agent_type)]
+        return [agent_type for agent_type in deduped if self._has_available_agent(agent_type)]
 
     @staticmethod
     def _needs_clarification(req: Request) -> bool:
@@ -623,10 +660,13 @@ class AgentOrchestrator:
         性能路由：从同类 Agent 中选 routing_score() 最高的。
         这是"基于在线表现动态调整路由"的核心。
         """
-        agents = self._pool.get(agent_type, [])
+        agents = [agent for agent in self._pool.get(agent_type, []) if agent.stats.available]
         if not agents:
             return None
         return max(agents, key=lambda a: a.stats.routing_score())
+
+    def _has_available_agent(self, agent_type: AgentType) -> bool:
+        return any(agent.stats.available for agent in self._pool.get(agent_type, []))
 
     async def _execute(self, req: Request, agent_type: AgentType) -> AgentResponse:
         """执行 Agent，失败时降级到 GeneralAgent。"""
@@ -664,6 +704,9 @@ class AgentOrchestrator:
                     "avg_ms":       round(agent.stats.avg_ms, 1),
                     "monitor_penalty": round(agent.stats.monitor_penalty, 3),
                     "routing_score": round(agent.stats.routing_score(), 3),
+                    "health_state": agent.stats.health_state,
+                    "unhealthy_cycles": agent.stats.unhealthy_cycles,
+                    "isolated_until": round(agent.stats.isolated_until, 3),
                 }
         return result
 
@@ -678,3 +721,18 @@ class AgentOrchestrator:
                 key = f"{agent_type.value}_{i}"
                 penalty = penalties.get(key, 0.0)
                 agent.stats.monitor_penalty = min(max(penalty, 0.0), 0.9)
+                agent.stats.refresh_health()
+                if agent_type == AgentType.GENERAL:
+                    continue
+                if penalty >= self._isolation_penalty_threshold:
+                    agent.stats.unhealthy_cycles += 1
+                    if agent.stats.unhealthy_cycles >= self._isolation_consecutive_cycles:
+                        agent.stats.health_state = "isolated"
+                        agent.stats.isolated_until = (
+                            time.monotonic() + self._isolation_recovery_seconds
+                        )
+                    elif agent.stats.health_state == "healthy":
+                        agent.stats.health_state = "degraded"
+                elif agent.stats.health_state != "isolated":
+                    agent.stats.unhealthy_cycles = 0
+                    agent.stats.health_state = "healthy"

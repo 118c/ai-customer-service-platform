@@ -85,6 +85,7 @@ services:
       - PROMETHEUS_PORT=0
       - CHROMA_PERSIST_DIRECTORY=/app/data/chroma
       - EVAL_BASELINE_PATH=/app/data/eval/baseline.json
+      - EVALUATION_DB_PATH=/app/data/eval/evaluations.db
       - SERVICE_SKILLS_DIR=/app/skills
     volumes:
       - ./data/chroma:/app/data/chroma

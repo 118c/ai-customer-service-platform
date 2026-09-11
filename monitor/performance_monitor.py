@@ -45,6 +45,7 @@ class Alert:
     threshold:   float
     ts:          str = field(default_factory=lambda: datetime.now().isoformat())
     resolved:    bool = False
+    resolved_at: Optional[str] = None
 
 
 @dataclass
@@ -117,6 +118,8 @@ class PerformanceMonitor:
         "agent_avg_ms":        (3000, Severity.WARNING,  "greater_than"),
         "tool_avg_ms":         (5000, Severity.ERROR,    "greater_than"),
     }
+    _SHARED_PROM: Optional[Dict[str, Any]] = None
+    _STARTED_PROMETHEUS_PORTS: set[int] = set()
 
     def __init__(
         self,
@@ -139,18 +142,29 @@ class PerformanceMonitor:
 
         # Prometheus 指标（可选）
         self._prom: Dict[str, Any] = {}
-        if prometheus_port:
-            self._setup_prometheus(prometheus_port)
+        self._setup_prometheus(prometheus_port)
 
-    def _setup_prometheus(self, port: int) -> None:
-        self._prom = {
-            "agent_success_rate": Gauge("agent_success_rate", "Agent 成功率", ["agent"]),
-            "agent_latency_ms":   Histogram("agent_latency_ms", "Agent 延迟", ["agent"]),
-            "tool_success_rate":  Gauge("tool_success_rate", "工具成功率", ["tool"]),
-            "requests_total":     Counter("requests_total", "总请求数"),
-        }
-        start_http_server(port)
-        logger.info(f"Prometheus 已启动: :{port}")
+    def _setup_prometheus(self, port: Optional[int]) -> None:
+        if self.__class__._SHARED_PROM is None:
+            self.__class__._SHARED_PROM = {
+                "agent_success_rate": Gauge("agent_success_rate", "Agent 成功率", ["agent"]),
+                "agent_avg_latency_ms": Gauge("agent_avg_latency_ms", "Agent 平均延迟", ["agent"]),
+                "agent_isolated": Gauge("agent_isolated", "Agent 是否处于隔离状态", ["agent"]),
+                "tool_success_rate": Gauge("tool_success_rate", "工具成功率", ["tool"]),
+                "tool_avg_latency_ms": Gauge("tool_avg_latency_ms", "工具平均延迟", ["tool"]),
+                "requests_total": Counter(
+                    "service_requests_total", "服务请求数", ["method", "path", "status"]
+                ),
+                "request_latency_ms": Histogram(
+                    "service_request_latency_ms", "服务请求延迟", ["method", "path"],
+                    buckets=(50, 100, 250, 500, 1000, 3000, 5000, 10000, 20000),
+                ),
+            }
+        self._prom = self.__class__._SHARED_PROM
+        if port and port not in self.__class__._STARTED_PROMETHEUS_PORTS:
+            start_http_server(port)
+            self.__class__._STARTED_PROMETHEUS_PORTS.add(port)
+            logger.info(f"Prometheus 已启动: :{port}")
 
     # ── 生命周期 ──────────────────────────────────────────────────────────────
 
@@ -209,7 +223,10 @@ class PerformanceMonitor:
             # Prometheus
             if "agent_success_rate" in self._prom:
                 self._prom["agent_success_rate"].labels(agent=agent_key).set(sr)
-                self._prom["agent_latency_ms"].labels(agent=agent_key).observe(ms)
+                self._prom["agent_avg_latency_ms"].labels(agent=agent_key).set(ms)
+                self._prom["agent_isolated"].labels(agent=agent_key).set(
+                    1 if s.get("health_state") == "isolated" else 0
+                )
 
             routing_penalties[agent_key] = self._routing_penalty(sr, ms)
 
@@ -224,6 +241,7 @@ class PerformanceMonitor:
 
             if "tool_success_rate" in self._prom:
                 self._prom["tool_success_rate"].labels(tool=tool_name).set(sr)
+                self._prom["tool_avg_latency_ms"].labels(tool=tool_name).set(ms)
 
             # 连续失败 → 生成具体建议
             if cf >= 3:
@@ -256,10 +274,19 @@ class PerformanceMonitor:
         threshold, severity, operator = self.THRESHOLDS[metric]
         triggered = (operator == "less_than" and value < threshold) or \
                     (operator == "greater_than" and value > threshold)
+        metric_key = f"{metric}:{label}"
         if triggered:
+            active = next(
+                (item for item in reversed(self._alerts) if item.metric == metric_key and not item.resolved),
+                None,
+            )
+            if active:
+                active.value = value
+                active.ts = datetime.now().isoformat()
+                return
             alert = Alert(
                 severity=severity,
-                metric=f"{metric}:{label}",
+                metric=metric_key,
                 message=f"{label} 的 {metric} = {value:.3f}，阈值 {threshold}",
                 value=value,
                 threshold=threshold,
@@ -269,6 +296,11 @@ class PerformanceMonitor:
             # 异步发送 Webhook（不阻塞采集循环）
             if self._webhook:
                 asyncio.create_task(self._send_webhook(alert))
+        else:
+            for alert in self._alerts:
+                if alert.metric == metric_key and not alert.resolved:
+                    alert.resolved = True
+                    alert.resolved_at = datetime.now().isoformat()
 
     def _generate_routing_suggestions(self, agent_stats: Dict[str, Any]) -> None:
         """
@@ -304,12 +336,21 @@ class PerformanceMonitor:
 
     # ── 查询接口 ──────────────────────────────────────────────────────────────
 
+    def record_request(self, method: str, path: str, status: int, latency_ms: float) -> None:
+        """Record one completed HTTP request using its route template."""
+        if "requests_total" not in self._prom:
+            return
+        labels = {"method": method, "path": path, "status": str(status)}
+        self._prom["requests_total"].labels(**labels).inc()
+        self._prom["request_latency_ms"].labels(method=method, path=path).observe(latency_ms)
+
     def summary(self) -> Dict[str, Any]:
         """返回当前监控摘要，供 API 层暴露。"""
         return {
             "agent_stats":   self._orchestrator.get_stats(),
             "tool_stats":    self._tool_manager.get_stats(),
             "active_alerts": [asdict(a) for a in self._alerts if not a.resolved][-10:],
+            "recent_resolved_alerts": [asdict(a) for a in self._alerts if a.resolved][-10:],
             "suggestions":   [
                 {"title": s.title, "action": s.action, "priority": s.priority}
                 for s in sorted(self._suggestions, key=lambda x: -x.priority)[:5]

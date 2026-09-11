@@ -45,10 +45,11 @@ docker compose up --build
 ```
 
 - Web：`http://localhost`
+- 质量控制台：`http://localhost/operations.html`
 - API：`http://localhost:8000`
 - OpenAPI：`http://localhost:8000/docs`
 - ChromaDB：`http://localhost:8001`
-- Grafana：`http://localhost:3000`
+- Prometheus：`http://localhost:9090`
 
 ### 本地开发
 
@@ -83,6 +84,10 @@ npm run dev
 | 运维端 | `GET /metrics` | Prometheus 指标 |
 | 管理端 | `POST /knowledge/add` | 导入知识文档 |
 | 质量端 | `POST /eval/run` | 执行回归评测 |
+| 质量端 | `POST /admin/evaluations/run` | 执行完整工作流评测并保存报告 |
+| 质量端 | `GET /admin/evaluations` | 查询历史评测运行 |
+| 质量端 | `GET /admin/evaluations/trends` | 查询指标趋势 |
+| 质量端 | `GET /admin/evaluations/{run_id}` | 查询单次评测明细 |
 
 ### 自然语言咨询
 
@@ -113,7 +118,7 @@ pytest
 python -m evaluation.evaluator
 ```
 
-仓库包含 55 条制造业务意图回归数据，CI 准确率门槛为 92%。正式上线前应使用目标模型与经过授权的企业数据重新生成质量报告。
+仓库包含 55 条制造业务意图回归数据和版本化完整工作流数据集。完整评测覆盖 LangGraph、知识检索、业务连接器、人工确认恢复、取消不写入与重复确认幂等，并计算 Recall@K、MRR、nDCG、引用准确率和答案事实支撑度。CI 意图准确率门槛为 92%；正式上线前应使用目标模型与经过授权的企业数据重新生成质量报告。
 
 ## 安全与发布
 

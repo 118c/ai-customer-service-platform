@@ -81,3 +81,25 @@ async def test_graph_pauses_and_resumes_reviewed_action(tmp_path):
     assert completed["action_result"]["success"] is True
     assert completed["action_result"]["record_id"].startswith("WF-")
     assert len(memory.messages) == 2
+
+    repeated = await workflow.resume("req-1", {"decision": "approve"})
+    assert repeated["action_result"]["record_id"] == completed["action_result"]["record_id"]
+    assert len(memory.messages) == 2
+
+
+async def test_graph_cancellation_does_not_create_business_record(tmp_path):
+    gateway = LocalReferenceGateway(str(tmp_path / "services.db"))
+    before = len(await gateway.list_tasks())
+    workflow = EmployeeServiceWorkflow(
+        orchestrator=FakeOrchestrator(), memory=FakeMemory(), tool_manager=FakeTools(),
+        business_gateway=gateway, checkpointer=InMemorySaver(),
+    )
+    initial = await workflow.invoke({
+        "request_id": "req-cancel", "user_id": "E1001", "conversation_id": "conv-cancel",
+        "message": "帮我提交领料申请", "started_at": time.time(),
+    })
+    completed = await workflow.resume("req-cancel", {"decision": "reject"})
+    assert initial["status"] == "awaiting_review"
+    assert completed["status"] == "completed"
+    assert not completed.get("action_result")
+    assert len(await gateway.list_tasks()) == before

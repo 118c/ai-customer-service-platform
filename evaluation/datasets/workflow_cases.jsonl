@@ -1,0 +1,4 @@
+{"case_id":"policy-rag-attendance","message":"跨日夜班的考勤日期怎么计算？","expected_intent":"attendance_query","relevant_documents":["三班制考勤与交接规范"],"expected_facts":["班次开始日期"]}
+{"case_id":"workflow-status-query","message":"申请单WF-202609-001现在到哪个节点？","expected_intent":"workflow_query"}
+{"case_id":"approval-cancel","message":"帮我提交一份领料申请","expected_intent":"approval_request","expected_action_type":"workflow.submit","decision":"cancel"}
+{"case_id":"repair-confirm-idempotency","message":"帮我给设备EQ-A17创建报修单，主轴有异响","expected_intent":"repair_request","expected_action_type":"repair.create","decision":"confirm","expect_receipt":true,"verify_idempotency":true}

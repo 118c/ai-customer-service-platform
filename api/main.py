@@ -53,6 +53,8 @@ _llm_gateway = None
 _checkpointer_context = None
 _business_gateway = None
 _trace_store = None
+_workflow_evaluator = None
+_evaluation_repository = None
 
 def _anthropic_cfg() -> Dict[str, Any]:
     key = os.getenv("ANTHROPIC_API_KEY", "offline-continuity")
@@ -70,12 +72,15 @@ def _anthropic_cfg() -> Dict[str, Any]:
 async def lifespan(app: FastAPI):
     global _orchestrator, _memory, _tool_manager, _monitor, _evaluator, _skill_manager
     global _workflow, _llm_gateway, _checkpointer_context, _business_gateway, _trace_store
+    global _workflow_evaluator, _evaluation_repository
 
     print(BANNER, flush=True)
 
     from agents.agent_orchestrator import AgentOrchestrator, Request
     from core.intent_recognizer import IntentRecognizer
     from evaluation.evaluator import EndToEndEvaluator
+    from evaluation.full_workflow_evaluator import FullWorkflowEvaluator
+    from evaluation.repository import EvaluationRepository
     from mcp.knowledge_base import KnowledgeBase
     from mcp.tool_manager import MCPToolManager, Tool
     from memory.conversation_memory import MemoryManager
@@ -202,6 +207,13 @@ async def lifespan(app: FastAPI):
         checkpointer=checkpointer,
     )
     app.state.checkpoint_backend = checkpoint_backend
+    _workflow_evaluator = FullWorkflowEvaluator(
+        _workflow,
+        dataset_version=os.getenv("WORKFLOW_EVAL_DATASET_VERSION", "2026.09"),
+    )
+    _evaluation_repository = EvaluationRepository(
+        os.getenv("EVALUATION_DB_PATH", "./data/evaluations.db")
+    )
 
     # 性能监控（可选启动 Prometheus）
     prom_port = int(os.getenv("PROMETHEUS_PORT", "0")) or None
@@ -271,10 +283,19 @@ async def request_context(request: FastAPIRequest, call_next):
                 headers={"X-Request-ID": request_id},
             )
     started = time.monotonic()
-    response = await call_next(request)
-    response.headers["X-Request-ID"] = request_id
-    response.headers["X-Process-Time-Ms"] = f"{(time.monotonic() - started) * 1000:.1f}"
-    return response
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        elapsed_ms = (time.monotonic() - started) * 1000
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.1f}"
+        return response
+    finally:
+        if _monitor is not None:
+            route = request.scope.get("route")
+            route_path = getattr(route, "path", request.url.path)
+            _monitor.record_request(request.method, route_path, status_code, (time.monotonic() - started) * 1000)
 
 
 # ── 请求/响应模型 ─────────────────────────────────────────────────────────────
@@ -629,6 +650,26 @@ class EvalRunInput(BaseModel):
     dialog_cases: Optional[List[EvalDialogInput]] = None
 
 
+class WorkflowEvalCaseInput(BaseModel):
+    case_id: str = Field(min_length=1, max_length=128)
+    message: str = Field(min_length=1, max_length=4000)
+    expected_intent: Optional[str] = None
+    expected_action_type: Optional[str] = None
+    expected_final_status: str = "completed"
+    decision: Optional[str] = Field(default=None, pattern="^(confirm|cancel|approve|reject)$")
+    relevant_documents: List[str] = Field(default_factory=list)
+    expected_facts: List[str] = Field(default_factory=list)
+    expect_receipt: bool = False
+    verify_idempotency: bool = False
+    expected_degradation_components: List[str] = Field(default_factory=list)
+    user_id: str = "E1001"
+
+
+class WorkflowEvalRunInput(BaseModel):
+    dataset_version: str = Field(default="2026.09", min_length=1, max_length=64)
+    cases: Optional[List[WorkflowEvalCaseInput]] = None
+
+
 @app.post("/knowledge/add", tags=["知识库"])
 async def add_knowledge(body: BatchDocInput, request: FastAPIRequest):
     """
@@ -775,6 +816,96 @@ async def run_eval(request: FastAPIRequest, body: Optional[EvalRunInput] = None)
             for r in report.results
         ],
     }
+
+
+def _default_workflow_eval_cases():
+    import json
+    from evaluation.full_workflow_evaluator import WorkflowEvaluationCase
+    dataset_path = pathlib.Path(_ROOT) / "evaluation" / "datasets" / "workflow_cases.jsonl"
+    if dataset_path.exists():
+        return [
+            WorkflowEvaluationCase(**json.loads(line))
+            for line in dataset_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    return [
+        WorkflowEvaluationCase(
+            case_id="policy-rag-attendance",
+            message="跨日夜班的考勤日期怎么计算？",
+            expected_intent="attendance_query",
+            relevant_documents=["三班制考勤与交接规范"],
+            expected_facts=["班次开始日期"],
+        ),
+        WorkflowEvaluationCase(
+            case_id="workflow-status-query",
+            message="申请单WF-202609-001现在到哪个节点？",
+            expected_intent="workflow_query",
+        ),
+        WorkflowEvaluationCase(
+            case_id="approval-cancel",
+            message="帮我提交一份领料申请",
+            expected_intent="approval_request",
+            expected_action_type="workflow.submit",
+            decision="cancel",
+        ),
+        WorkflowEvaluationCase(
+            case_id="repair-confirm-idempotency",
+            message="帮我给设备EQ-A17创建报修单，主轴有异响",
+            expected_intent="repair_request",
+            expected_action_type="repair.create",
+            decision="confirm",
+            expect_receipt=True,
+            verify_idempotency=True,
+        ),
+    ]
+
+
+@app.post("/admin/evaluations/run", tags=["Operations"])
+async def run_workflow_evaluation(
+    request: FastAPIRequest, body: Optional[WorkflowEvalRunInput] = None
+):
+    """Run the versioned LangGraph/RAG/business/HITL regression suite."""
+    _require_admin(request)
+    if _workflow is None or _evaluation_repository is None:
+        raise HTTPException(503, "评测服务未就绪")
+    from evaluation.full_workflow_evaluator import FullWorkflowEvaluator, WorkflowEvaluationCase
+
+    dataset_version = body.dataset_version if body else "2026.09"
+    if body and body.cases is not None:
+        cases = [WorkflowEvaluationCase(**case.model_dump()) for case in body.cases]
+    else:
+        cases = _default_workflow_eval_cases()
+    evaluator = FullWorkflowEvaluator(_workflow, dataset_version=dataset_version)
+    report = await evaluator.run(cases)
+    await _evaluation_repository.save_run_async(report)
+    return report.to_dict()
+
+
+@app.get("/admin/evaluations", tags=["Operations"])
+async def list_workflow_evaluations(request: FastAPIRequest, limit: int = 20):
+    _require_admin(request)
+    if _evaluation_repository is None:
+        raise HTTPException(503, "评测存储未就绪")
+    return {"items": await _evaluation_repository.list_runs_async(limit)}
+
+
+@app.get("/admin/evaluations/trends", tags=["Operations"])
+async def workflow_evaluation_trends(request: FastAPIRequest, limit: int = 30):
+    _require_admin(request)
+    if _evaluation_repository is None:
+        raise HTTPException(503, "评测存储未就绪")
+    return {"items": await _evaluation_repository.trends_async(limit)}
+
+
+@app.get("/admin/evaluations/{run_id}", tags=["Operations"])
+async def get_workflow_evaluation(run_id: str, request: FastAPIRequest):
+    _require_admin(request)
+    if _evaluation_repository is None:
+        raise HTTPException(503, "评测存储未就绪")
+    report = await _evaluation_repository.get_run_async(run_id)
+    if report is None:
+        raise HTTPException(404, "未找到评测记录")
+    return report
 
 
 # ── 交互式 CLI ────────────────────────────────────────────────────────────────

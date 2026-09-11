@@ -35,6 +35,7 @@ class WorkflowState(TypedDict, total=False):
     knowledge_used: bool
     sources: List[Dict[str, Any]]
     business_context: Dict[str, Any]
+    degradation_events: List[Dict[str, str]]
     response: str
     agent_type: str
     agent_types: List[str]
@@ -90,9 +91,17 @@ class EmployeeServiceWorkflow:
         return builder
 
     async def _load_context(self, state: WorkflowState) -> Dict[str, Any]:
-        memory = await self.memory.get_context(
-            state["user_id"], state["conversation_id"], query=state["message"]
-        )
+        try:
+            memory = await self.memory.get_context(
+                state["user_id"], state["conversation_id"], query=state["message"]
+            )
+        except Exception as ex:
+            return {
+                "history": [],
+                "context": "",
+                "status": "running",
+                "degradation_events": [self._degradation("memory.read", ex)],
+            }
         history = [
             {"role": item.role.value, "content": item.content}
             for item in memory.recent_messages[-5:]
@@ -100,7 +109,22 @@ class EmployeeServiceWorkflow:
         return {"history": history, "context": memory.to_prompt_text(), "status": "running"}
 
     async def _recognize_intent(self, state: WorkflowState) -> Dict[str, Any]:
-        result = await self.orchestrator.recognize_intent(state["message"], history=state.get("history"))
+        try:
+            result = await self.orchestrator.recognize_intent(
+                state["message"], history=state.get("history")
+            )
+        except Exception as ex:
+            events = list(state.get("degradation_events", []))
+            events.append(self._degradation("intent.recognize", ex))
+            return {
+                "intent": "other",
+                "intent_group": "general",
+                "intent_confidence": 0.0,
+                "intent_source_scores": {},
+                "entities": {},
+                "urgency": "low",
+                "degradation_events": events,
+            }
         return {
             "intent": result.intent.value,
             "intent_group": result.intent_group,
@@ -114,40 +138,55 @@ class EmployeeServiceWorkflow:
         parts = [state.get("context", "")]
         knowledge_used = False
         public_sources: List[Dict[str, Any]] = []
+        degradation_events = list(state.get("degradation_events", []))
         if self._needs_knowledge(state.get("intent", "")):
-            search = await self.tool_manager.search_with_rewrite(
-                "knowledge_search", state["message"], top_k=3
-            )
-            if search.success and isinstance(search.data, list) and search.data:
-                citations = []
-                for item in search.data[:3]:
-                    if isinstance(item, dict) and item.get("content") and not item.get("fallback"):
-                        title = str(item.get("title", "企业知识"))
-                        excerpt = self._public_excerpt(str(item["content"]))
-                        public_sources.append({
-                            "title": title,
-                            "excerpt": excerpt,
-                            "score": round(float(item.get("score", 0.0) or 0.0), 4),
-                        })
-                        citations.append(
-                            f"- {title} (score={item.get('score', 0)}): "
-                            f"{str(item['content'])[:600]}"
-                        )
-                if citations:
-                    parts.append("[企业知识库]\n" + "\n".join(citations))
-                    knowledge_used = True
+            try:
+                search = await self.tool_manager.search_with_rewrite(
+                    "knowledge_search", state["message"], top_k=3
+                )
+                if search.success and isinstance(search.data, list) and search.data:
+                    citations = []
+                    for item in search.data[:3]:
+                        if isinstance(item, dict) and item.get("content") and not item.get("fallback"):
+                            title = str(item.get("title", "企业知识"))
+                            excerpt = self._public_excerpt(str(item["content"]))
+                            public_sources.append({
+                                "document_id": str(item.get("document_id", "")),
+                                "title": title,
+                                "excerpt": excerpt,
+                                "score": round(float(item.get("score", 0.0) or 0.0), 4),
+                            })
+                            citations.append(
+                                f"- {title} (score={item.get('score', 0)}): "
+                                f"{str(item['content'])[:600]}"
+                            )
+                    if citations:
+                        parts.append("[企业知识库]\n" + "\n".join(citations))
+                        knowledge_used = True
+                elif not search.success:
+                    degradation_events.append({
+                        "component": "knowledge.search",
+                        "error_type": "unavailable",
+                        "message": str(getattr(search, "error", "检索未成功"))[:160],
+                    })
+            except Exception as ex:
+                degradation_events.append(self._degradation("knowledge.search", ex))
 
         business_context: Dict[str, Any] = {}
         query = plan_business_query(state.get("intent", ""), state.get("entities"))
         if query:
             action_type, payload = query
-            business_context = await self.business_gateway.query(action_type, payload)
-            parts.append("[业务系统查询结果]\n" + json.dumps(business_context, ensure_ascii=False))
+            try:
+                business_context = await self.business_gateway.query(action_type, payload)
+                parts.append("[业务系统查询结果]\n" + json.dumps(business_context, ensure_ascii=False))
+            except Exception as ex:
+                degradation_events.append(self._degradation("business.query", ex))
         return {
             "context": "\n\n".join(part for part in parts if part),
             "knowledge_used": knowledge_used,
             "sources": public_sources,
             "business_context": business_context,
+            "degradation_events": degradation_events,
         }
 
     async def _execute_agents(self, state: WorkflowState) -> Dict[str, Any]:
@@ -166,7 +205,22 @@ class EmployeeServiceWorkflow:
             urgency=UrgencyLevel[state.get("urgency", "low").upper()],
             intent_confidence=state.get("intent_confidence", 0.0),
         )
-        result = await self.orchestrator.run(request)
+        try:
+            result = await self.orchestrator.run(request)
+        except Exception as ex:
+            events = list(state.get("degradation_events", []))
+            events.append(self._degradation("agent.execute", ex))
+            return {
+                "response": "服务暂时繁忙，已保留本次请求，请稍后重试或联系人工服务。",
+                "agent_type": "general",
+                "agent_types": ["general"],
+                "primary_agent": "general",
+                "supporting_agents": [],
+                "routing_reason": "controlled_degradation",
+                "routing_confidence": 0.0,
+                "escalated": False,
+                "degradation_events": events,
+            }
         return {
             "response": result.response,
             "agent_type": result.agent_type.value,
@@ -181,7 +235,7 @@ class EmployeeServiceWorkflow:
     async def _prepare_action(self, state: WorkflowState) -> Dict[str, Any]:
         action = plan_business_action(
             state.get("intent", ""), state["message"], state["user_id"],
-            state["conversation_id"], state.get("entities"),
+            state["conversation_id"], state.get("entities"), request_id=state["request_id"],
         )
         if not action and state.get("escalated"):
             action = BusinessAction(
@@ -190,6 +244,7 @@ class EmployeeServiceWorkflow:
                  "conversation_id": state["conversation_id"]},
                 False,
                 "创建人工协同任务",
+                state["request_id"],
             )
         return {"pending_action": self._action_dict(action) if action else {}}
 
@@ -217,9 +272,22 @@ class EmployeeServiceWorkflow:
             payload=raw["payload"],
             requires_review=raw["requires_review"],
             description=raw["description"],
+            idempotency_key=raw.get("idempotency_key", state["request_id"]),
         )
-        result = await self.business_gateway.execute(action)
-        return {"action_result": result}
+        try:
+            result = await self.business_gateway.execute(action)
+            return {"action_result": result}
+        except Exception as ex:
+            events = list(state.get("degradation_events", []))
+            events.append(self._degradation("business.execute", ex))
+            return {
+                "action_result": {
+                    "success": False,
+                    "status": "temporarily_unavailable",
+                    "reason": type(ex).__name__,
+                },
+                "degradation_events": events,
+            }
 
     async def _persist_result(self, state: WorkflowState) -> Dict[str, Any]:
         response = state.get("response", "")
@@ -229,12 +297,19 @@ class EmployeeServiceWorkflow:
             response += "\n\n已按你的选择取消提交。"
         elif action_result.get("success"):
             response += f"\n\n业务操作已受理，编号：{action_result.get('record_id')}。"
-        await self.memory.add_message(state["user_id"], state["conversation_id"], MsgRole.USER, state["message"])
-        await self.memory.add_message(state["user_id"], state["conversation_id"], MsgRole.ASSISTANT, response)
+        elif action_result:
+            response += "\n\n业务系统暂时未能受理该操作，请稍后重试；本次未重复创建事项。"
+        events = list(state.get("degradation_events", []))
+        try:
+            await self.memory.add_message(state["user_id"], state["conversation_id"], MsgRole.USER, state["message"])
+            await self.memory.add_message(state["user_id"], state["conversation_id"], MsgRole.ASSISTANT, response)
+        except Exception as ex:
+            events.append(self._degradation("memory.write", ex))
         return {
             "response": response,
             "status": "completed",
             "latency_ms": max(0.0, (time.time() - state["started_at"]) * 1000),
+            "degradation_events": events,
         }
 
     @staticmethod
@@ -257,6 +332,7 @@ class EmployeeServiceWorkflow:
             "payload": action.payload,
             "requires_review": action.requires_review,
             "description": action.description,
+            "idempotency_key": action.idempotency_key,
         }
 
     @staticmethod
@@ -286,8 +362,19 @@ class EmployeeServiceWorkflow:
 
     async def resume(self, request_id: str, decision: Dict[str, Any]) -> Dict[str, Any]:
         config = {"configurable": {"thread_id": request_id}}
+        snapshot = await self.graph.aget_state(config)
+        if snapshot.values and not snapshot.next and snapshot.values.get("status") == "completed":
+            return self._public_result(dict(snapshot.values))
         result = await self.graph.ainvoke(Command(resume=decision), config=config)
         return self._public_result(result)
+
+    @staticmethod
+    def _degradation(component: str, error: Exception) -> Dict[str, str]:
+        return {
+            "component": component,
+            "error_type": type(error).__name__,
+            "message": str(error)[:160],
+        }
 
     @staticmethod
     def _public_result(result: Dict[str, Any]) -> Dict[str, Any]:
